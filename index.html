@@ -631,11 +631,48 @@ body.playing .ring-level small{
 }
 </style>
 
+
+<style>
+/* AirPlay v13 */
+.top-right-hotspot{width:150px;height:100px}
+.corner-actions{display:flex;gap:7px;align-items:center}
+.corner-btn{
+  width:36px;height:36px;border:1px solid var(--glass-line);border-radius:12px;
+  background:color-mix(in srgb,var(--glass) 82%,transparent);color:var(--muted);
+  backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);box-shadow:none;
+  opacity:0;transform:translateY(-4px) scale(.96);pointer-events:none;
+  transition:opacity .18s ease,transform .18s ease,background .18s ease
+}
+.top-right-hotspot:hover .corner-btn,.top-right-hotspot:focus-within .corner-btn{
+  opacity:.9;transform:translateY(0) scale(1);pointer-events:auto
+}
+.corner-btn:hover{opacity:1!important;background:color-mix(in srgb,var(--glass) 78%,var(--ring-hi) 22%)}
+.airplay-btn.active{color:var(--ring-hi);background:color-mix(in srgb,var(--glass) 70%,var(--ring) 30%)}
+.airplay-glyph{position:relative;display:block;width:18px;height:17px;margin:auto}
+.airplay-glyph:before{
+  content:"";position:absolute;left:1px;right:1px;top:1px;height:10px;
+  border:1.35px solid currentColor;border-radius:2px
+}
+.airplay-glyph:after{
+  content:"";position:absolute;left:50%;bottom:0;transform:translateX(-50%);
+  width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;
+  border-bottom:7px solid currentColor
+}
+@media (hover:none){
+  .corner-btn{opacity:.28;transform:none;pointer-events:auto}
+}
+</style>
 </head>
 <body>
+<audio id="airplayAudio" preload="metadata" loop playsinline x-webkit-airplay="allow" style="display:none"></audio>
 <main>
   <div id="topRightHotspot" class="top-right-hotspot">
-    <button id="fullscreenBtn" class="fullscreen-btn" aria-label="フルスクリーン">⛶</button>
+    <div class="corner-actions">
+      <button id="airplayBtn" class="corner-btn airplay-btn" aria-label="AirPlay" hidden>
+        <span class="airplay-glyph" aria-hidden="true"></span>
+      </button>
+      <button id="fullscreenBtn" class="corner-btn fullscreen-btn" aria-label="フルスクリーン">⛶</button>
+    </div>
   </div>
 
   <section class="stage">
@@ -716,7 +753,7 @@ const API="https://marine-api.open-meteo.com/v1/marine";
 const LAT=35.64,LON=139.76;
 const DATUM_OFFSET_CM=114.1;
 
-let mode="auto",playing=false;
+let mode="auto",playing=false,airplayWireless=false,airplayAvailable=false,airplayReverseUrl=null,airplayTremTimer=null;
 let ctx=null,bufferF=null,bufferR=null,master=null,compressor=null,sources=[];
 let tremOsc=null,tremNodes=[];
 let autoData=null,lastFetch=0,autoError=null;
@@ -820,6 +857,7 @@ function layerTargets(s){
 }
 function startSources(){
  if(!ctx||!playing)return;
+ if(airplayWireless){updateAirplayMedia(true);return;}
  const s=getState();stopSources(.18);clearTrem();
  const now=ctx.currentTime+.22;
  const dur=(s.direction==="forward"?bufferF:bufferR).duration;
@@ -852,6 +890,7 @@ function applyAudio(initial=false){
      }
    }
  }
+ if(airplayWireless)updateAirplayMedia(false);
  render();
 }
 function parseTokyo(s){return new Date(s+"+09:00").getTime()}
@@ -933,13 +972,112 @@ function render(){
  $("#detailLevel").textContent=Math.round(s.levelCm)+" cm";
  $("#detailDirection").textContent=still?"潮止まり":dir;
  $("#detailNext").textContent=mode==="auto"&&autoData?.next?autoData.next.type+" "+fmtTime(autoData.next.time):"--";
- $("#detailEffect").textContent=trem?"揺らぎ ON":"通常";
+ $("#detailEffect").textContent=(airplayWireless?"AirPlay · ":"")+(trem?"揺らぎ ON":"通常");
  $("#detailUpdate").textContent=mode==="auto"&&autoData?fmtTime(autoData.fetchedAt):"--";
 }
+
+function audioDataUri(){
+  return "data:audio/mp4;base64,"+AUDIO_B64;
+}
+function bufferToWavBlob(audioBuffer){
+  const channels=audioBuffer.numberOfChannels;
+  const sampleRate=audioBuffer.sampleRate;
+  const frames=audioBuffer.length;
+  const bytesPerSample=2;
+  const blockAlign=channels*bytesPerSample;
+  const dataBytes=frames*blockAlign;
+  const ab=new ArrayBuffer(44+dataBytes);
+  const view=new DataView(ab);
+  const put=(o,s)=>{for(let i=0;i<s.length;i++)view.setUint8(o+i,s.charCodeAt(i))};
+  put(0,"RIFF");view.setUint32(4,36+dataBytes,true);put(8,"WAVE");
+  put(12,"fmt ");view.setUint32(16,16,true);view.setUint16(20,1,true);
+  view.setUint16(22,channels,true);view.setUint32(24,sampleRate,true);
+  view.setUint32(28,sampleRate*blockAlign,true);view.setUint16(32,blockAlign,true);
+  view.setUint16(34,16,true);put(36,"data");view.setUint32(40,dataBytes,true);
+  const data=[];for(let ch=0;ch<channels;ch++)data.push(audioBuffer.getChannelData(ch));
+  let off=44;
+  for(let i=0;i<frames;i++){
+    for(let ch=0;ch<channels;ch++){
+      let s=Math.max(-1,Math.min(1,data[ch][i]));
+      view.setInt16(off,s<0?s*0x8000:s*0x7fff,true);off+=2;
+    }
+  }
+  return new Blob([ab],{type:"audio/wav"});
+}
+function ensureAirplayReverseUrl(){
+  if(!airplayReverseUrl&&bufferR){
+    airplayReverseUrl=URL.createObjectURL(bufferToWavBlob(bufferR));
+  }
+  return airplayReverseUrl;
+}
+function stopAirplayTremolo(){
+  if(airplayTremTimer){clearInterval(airplayTremTimer);airplayTremTimer=null}
+}
+function updateAirplayMedia(forceSource=false){
+  const a=$("#airplayAudio"),s=getState();
+  const wanted=s.direction==="forward"?audioDataUri():ensureAirplayReverseUrl();
+  if(!wanted)return;
+  const current=a.getAttribute("src");
+  if(forceSource||current!==wanted){
+    const shouldPlay=playing&&!a.paused;
+    a.pause();a.setAttribute("src",wanted);a.load();
+    if(playing||shouldPlay)a.play().catch(()=>{});
+  }
+  a.playbackRate=s.rate;a.defaultPlaybackRate=s.rate;
+  if("preservesPitch" in a)a.preservesPitch=false;
+  if("webkitPreservesPitch" in a)a.webkitPreservesPitch=false;
+  stopAirplayTremolo();
+  const baseVol=.92*(1-.10*s.still);
+  if(s.levelCm>150){
+    const strength=clamp((s.levelCm-150)/70),start=performance.now();
+    airplayTremTimer=setInterval(()=>{
+      const phase=(performance.now()-start)/1000*2*Math.PI*.70;
+      a.volume=clamp(baseVol*(1+.055*strength*Math.sin(phase)),0,1);
+    },80);
+  }else a.volume=clamp(baseVol,0,1);
+}
+async function enterAirplayPath(){
+  airplayWireless=true;clearTrem();stopSources(.18);
+  updateAirplayMedia(true);
+  if(playing){try{await $("#airplayAudio").play()}catch{}}
+  $("#airplayBtn")?.classList.add("active");
+}
+function leaveAirplayPath(){
+  airplayWireless=false;stopAirplayTremolo();
+  $("#airplayAudio").pause();$("#airplayBtn")?.classList.remove("active");
+  if(playing)startSources();
+}
+function setupAirplay(){
+  const a=$("#airplayAudio"),btn=$("#airplayBtn");
+  a.setAttribute("src",audioDataUri());a.load();
+  if(typeof a.webkitShowPlaybackTargetPicker==="function"){
+    btn.hidden=false;
+    a.addEventListener("webkitplaybacktargetavailabilitychanged",e=>{
+      airplayAvailable=e.availability==="available";
+      btn.hidden=!airplayAvailable;
+    });
+    a.addEventListener("webkitcurrentplaybacktargetiswirelesschanged",()=>{
+      const wireless=!!a.webkitCurrentPlaybackTargetIsWireless;
+      if(wireless&&!airplayWireless)enterAirplayPath();
+      else if(!wireless&&airplayWireless)leaveAirplayPath();
+    });
+    btn.addEventListener("click",e=>{
+      e.stopPropagation();
+      try{updateAirplayMedia(false);a.webkitShowPlaybackTargetPicker()}catch(err){console.warn(err)}
+    });
+  }else btn.hidden=true;
+}
+
 async function togglePlay(){
  await ensureAudio();await ctx.resume();
- if(!playing){playing=true;startSources()}
- else{playing=false;clearTrem();stopSources(.25)}
+ const a=$("#airplayAudio");
+ if(!playing){
+   playing=true;
+   if(airplayWireless){updateAirplayMedia(false);try{await a.play()}catch{}}
+   else startSources();
+ }else{
+   playing=false;clearTrem();stopSources(.25);stopAirplayTremolo();a.pause();
+ }
  render();
 }
 function setMode(m){
@@ -984,6 +1122,8 @@ document.addEventListener("fullscreenchange",()=>{
   $("#fullscreenBtn").textContent=on?"×":"⛶";
   $("#fullscreenBtn").setAttribute("aria-label",on?"フルスクリーンを終了":"フルスクリーン");
 });
+
+setupAirplay();
 
 // API: 10分に1回取得。UI/音の状態はローカル計算で1分ごとに更新。
 fetchAuto();
