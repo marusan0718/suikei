@@ -809,11 +809,6 @@ const $=q=>document.querySelector(q);
 const clamp=(x,a=0,b=1)=>Math.max(a,Math.min(b,x));
 const lerp=(a,b,t)=>a+(b-a)*t;
 
-function b64buf(b64){
- const bin=atob(b64),u=new Uint8Array(bin.length);
- for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);
- return u.buffer;
-}
 async function ensureAudio(){
  if(ctx)return;
  ctx=new (window.AudioContext||window.webkitAudioContext)({latencyHint:"playback"});
