@@ -787,6 +787,12 @@ body.playing .ring-level small{
       <button class="active" data-v="forward">上潮</button>
       <button data-v="reverse">下潮</button>
     </div>
+    <div class="segment" id="simTimeBand">
+      <button data-v="morning">朝</button>
+      <button class="active" data-v="afternoon">昼</button>
+      <button data-v="evening">夜</button>
+      <button data-v="offhours">深夜</button>
+    </div>
   </div>
 
   <p class="note">表示は端末のライト / ダーク設定に合わせて変化します。初回再生時のみタップが必要です。</p>
@@ -1152,6 +1158,15 @@ $("#simDirection").addEventListener("click",e=>{
  const b=e.target.closest("button");if(!b)return;sim.direction=b.dataset.v;
  [...$("#simDirection").querySelectorAll("button")].forEach(x=>x.classList.toggle("active",x===b));
  if(playing){if(airplayWireless)updateAirplayMedia(true);else startSources()}else render();
+});
+$("#simTimeBand").addEventListener("click",e=>{
+ const b=e.target.closest("button");if(!b)return;
+ sim.timeBand=b.dataset.v;
+ [...$("#simTimeBand").querySelectorAll("button")].forEach(x=>x.classList.toggle("active",x===b));
+ if(playing){
+   if(airplayWireless)updateAirplayMedia(false);
+   else applyAudio();
+ }else render();
 });
 
 
