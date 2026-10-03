@@ -715,11 +715,11 @@ body.playing .ring-level small{
       <button data-v="reverse">下潮</button>
     </div>
     <div class="segment layer-solo" id="simLayerSolo">
-      <button class="active" data-layer="0">第1層</button>
-      <button data-layer="1">第2層</button>
-      <button data-layer="2">第3層</button>
-      <button data-layer="3">第4層</button>
-      <button data-layer="4">第5層</button>
+      <button class="active" data-layer="0" aria-pressed="true">第1層</button>
+      <button data-layer="1" aria-pressed="false">第2層</button>
+      <button data-layer="2" aria-pressed="false">第3層</button>
+      <button data-layer="3" aria-pressed="false">第4層</button>
+      <button data-layer="4" aria-pressed="false">第5層</button>
     </div>
   </div>
 
@@ -740,7 +740,7 @@ let ctx=null,bufferF=null,bufferR=null,master=null,compressor=null,sources=[];
 let tremOsc=null,tremNodes=[];
 let layerFrames=[],layerReadyPromise=null,layerTremTimer=null;
 let autoData=null,lastFetch=0,autoError=null;
-let sim={direction:"forward",speedNorm:.5,levelCm:120,minutesFromExtremum:-20,timeBand:"afternoon",soloLayer:0};
+let sim={direction:"forward",speedNorm:.5,levelCm:120,minutesFromExtremum:-20,timeBand:"afternoon",layers:[true,false,false,false,false]};
 
 const $=q=>document.querySelector(q);
 const clamp=(x,a=0,b=1)=>Math.max(a,Math.min(b,x));
@@ -862,9 +862,8 @@ function layerMixFactors(s){
  const stillCut=[.08,.38,.06,0,.16,.40];
 
  if(mode==="sim"){
-   const solo=clamp(Number(sim.soloLayer)||0,0,4);
    return [0,1,2,3,4,5].map(i=>
-     i===solo ? (1-stillCut[i]*s.still) : 0
+     i<5 && sim.layers[i] ? (1-stillCut[i]*s.still) : 0
    );
  }
 
@@ -1019,8 +1018,10 @@ $("#simDirection").addEventListener("click",e=>{
 });
 $("#simLayerSolo").addEventListener("click",e=>{
  const b=e.target.closest("button");if(!b)return;
- sim.soloLayer=clamp(Number(b.dataset.layer)||0,0,4);
- [...$("#simLayerSolo").querySelectorAll("button")].forEach(x=>x.classList.toggle("active",x===b));
+ const i=clamp(Number(b.dataset.layer)||0,0,4);
+ sim.layers[i]=!sim.layers[i];
+ b.classList.toggle("active",sim.layers[i]);
+ b.setAttribute("aria-pressed",sim.layers[i]?"true":"false");
  if(playing)applyAudio();
  else render();
 });
