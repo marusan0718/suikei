@@ -244,19 +244,20 @@ weights={
 }
 # common scale based on afternoon peak, preserving quieter night
 aft=sum(np.load(STEMS/f'layer{i}.npy',mmap_mode='r')*weights['afternoon'][i-1] for i in range(1,7))
-peak=float(np.max(np.abs(aft))); global_scale=.72/max(peak,1e-6); del aft
+peak=float(np.max(np.abs(aft))); global_scale=.50/max(peak,1e-6); del aft
 print('global scale',global_scale)
 for name,w in weights.items():
     mix=np.zeros((N,2),np.float32)
     for i,ww in enumerate(w,1): mix += np.load(STEMS/f'layer{i}.npy',mmap_mode='r')*ww
     mix*=global_scale
-    mix=np.tanh(mix*1.05).astype(np.float32)/np.tanh(1.05)
+    # Keep the HomePod master linear: no saturation/soft clipping on sustained tones.
+    mix=np.clip(mix,-0.98,0.98).astype(np.float32)
     out=circularize(mix)
     wav=OUT/f'homepod-{name}.wav'
     m4a=OUT/f'homepod-{name}.m4a'
     reverse_m4a=OUT/f'homepod-{name}-reverse.m4a'
     wavfile.write(wav,SR,(np.clip(out,-1,1)*32767).astype(np.int16))
-    subprocess.run(['ffmpeg','-y','-hide_banner','-loglevel','error','-i',str(wav),'-c:a','aac','-b:a','48k','-ar','44100',str(m4a)],check=True)
+    subprocess.run(['ffmpeg','-y','-hide_banner','-loglevel','error','-i',str(wav),'-c:a','aac','-b:a','256k','-ar','48000',str(m4a)],check=True)
     subprocess.run(['ffmpeg','-y','-hide_banner','-loglevel','error','-i',str(wav),'-af','areverse','-c:a','aac','-b:a','48k','-ar','44100',str(reverse_m4a)],check=True)
     wav.unlink()
     print(name,m4a.stat().st_size,'bytes',reverse_m4a.stat().st_size,'reverse bytes','peak',float(np.max(np.abs(out))), 'rms',float(np.sqrt(np.mean(out**2))))
