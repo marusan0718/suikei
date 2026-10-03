@@ -1,0 +1,48 @@
+name: Render HomePod audio
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/render-homepod-audio.yml'
+      - 'scripts/render_homepod_audio.py'
+      - 'index.html'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  render:
+    if: ${{ !contains(github.event.head_commit.message || '', '[skip homepod render]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install renderer dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install --upgrade pip
+          python -m pip install numpy scipy
+
+      - name: Render four seamless time-of-day mixes
+        run: python scripts/render_homepod_audio.py
+
+      - name: Commit generated media
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add homepod-audio/*.m4a
+          if git diff --cached --quiet; then
+            echo "No audio changes"
+            exit 0
+          fi
+          git commit -m "Render HomePod time-of-day audio [skip homepod render]"
+          git push
