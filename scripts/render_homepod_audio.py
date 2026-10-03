@@ -258,6 +258,6 @@ for name,w in weights.items():
     reverse_m4a=OUT/f'homepod-{name}-reverse.m4a'
     wavfile.write(wav,SR,(np.clip(out,-1,1)*32767).astype(np.int16))
     subprocess.run(['ffmpeg','-y','-hide_banner','-loglevel','error','-i',str(wav),'-c:a','aac','-b:a','256k','-ar','48000',str(m4a)],check=True)
-    subprocess.run(['ffmpeg','-y','-hide_banner','-loglevel','error','-i',str(wav),'-af','areverse','-c:a','aac','-b:a','48k','-ar','44100',str(reverse_m4a)],check=True)
+    subprocess.run(['ffmpeg','-y','-hide_banner','-loglevel','error','-i',str(wav),'-af','areverse','-c:a','aac','-b:a','256k','-ar','48000',str(reverse_m4a)],check=True)
     wav.unlink()
     print(name,m4a.stat().st_size,'bytes',reverse_m4a.stat().st_size,'reverse bytes','peak',float(np.max(np.abs(out))), 'rms',float(np.sqrt(np.mean(out**2))))
