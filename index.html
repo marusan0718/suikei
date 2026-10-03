@@ -749,7 +749,7 @@ let layerFrames=[],layerReadyPromise=null,layerTremTimer=null;
 let autoData=null,lastFetch=0,autoError=null;
 let sim={direction:"forward",speedNorm:.5,levelCm:120,minutesFromExtremum:-20,timeBand:"afternoon",soundMode:"layers",layers:[true,false,false,false,false,false]};
 let activeSoundMode=null,audioSwitchToken=0;
-let nightCtx=null,nightBus=null,nightMaster=null,nightFilter=null,nightPadNodes=[],nightTimer=null,nightPadTimer=null,nightPadVoiceTimers=[],nightPadGeneration=0,nightRunning=false,nightPulse=0,nightPattern=null,nightState=null,nightLastNote=4,nightPadScene=0;
+let nightCtx=null,nightBus=null,nightMaster=null,nightFilter=null,nightPadNodes=[],nightTimer=null,nightPadTimer=null,nightPadGeneration=0,nightPadLastSceneMs=0,nightRunning=false,nightPulse=0,nightPattern=null,nightState=null,nightLastNote=4,nightPadScene=0;
 
 const $=q=>document.querySelector(q);
 const clamp=(x,a=0,b=1)=>Math.max(a,Math.min(b,x));
@@ -961,6 +961,11 @@ function scheduleNightStep(){
    const levelBoost=clamp((s.levelCm-150)/70);
    const sparkleChance=clamp(.15+speed*.045+levelBoost*.08-still*.035,.10,.30);
    if(Math.random()<sparkleChance)nightSparkle(now+.35+Math.random()*.8,s);
+
+   // Pad watchdog: grain scheduling is already alive, so use it to revive a stalled background.
+   if(nightRunning && performance.now()-nightPadLastSceneMs>19000){
+     scheduleNightPadScene(false);
+   }
  }
 
  nightPulse=(nightPulse+1)%16;
@@ -987,74 +992,71 @@ function nightPadSceneSpec(index,s){
  if(high>0)out[659.25]=.00055*high;
  return out;
 }
-function clearNightPadVoiceTimers(){
- nightPadVoiceTimers.forEach(clearTimeout);
- nightPadVoiceTimers=[];
-}
 function applyNightPadScene(index,s,{stagger=true}={}){
  if(!nightCtx||!nightPadNodes.length)return;
  const spec=nightPadSceneSpec(index,s);
  const now=nightCtx.currentTime;
- const generation=++nightPadGeneration;
- clearNightPadVoiceTimers();
+ ++nightPadGeneration;
+ nightPadLastSceneMs=performance.now();
 
- // First let the previous voicing recede gently.
+ // Fade notes that are not part of the new voicing.
  nightPadNodes.forEach(node=>{
-   const target=spec[node.freq]||0;
-   if(!target){
-     node.g.gain.cancelScheduledValues(now);
-     node.g.gain.setTargetAtTime(.0001,now,2.1);
-   }
+   if(node.freq in spec)return;
+   const g=node.g.gain;
+   try{
+     g.cancelScheduledValues(now);
+     g.setTargetAtTime(.0001,now,1.7);
+   }catch(_e){}
  });
 
- const active=Object.entries(spec);
- active.forEach(([freq,gain],i)=>{
+ // Staggered entries are scheduled on the Web Audio clock itself.
+ // This remains stable even if Safari throttles ordinary JavaScript timers.
+ Object.entries(spec).forEach(([freq,gain],i)=>{
+   const node=nightPadNodes.find(n=>n.freq===freq);
+   if(!node)return;
    const delay=stagger?[0,.7,1.6,2.5,.9][i%5]:0;
-   const id=setTimeout(()=>{
-     if(!nightRunning||generation!==nightPadGeneration)return;
-     const node=nightPadNodes.find(n=>n.freq===freq);
-     if(!node)return;
-     const t=nightCtx.currentTime;
-     node.g.gain.cancelScheduledValues(t);
-     node.g.gain.setTargetAtTime(Math.max(.0001,gain),t,1.55+i*.18);
-   },delay*1000);
-   nightPadVoiceTimers.push(id);
+   const at=now+delay;
+   const g=node.g.gain;
+   try{
+     g.cancelScheduledValues(now);
+     if(delay>0){
+       g.setTargetAtTime(.00012,now,.55);
+     }
+     g.setTargetAtTime(Math.max(.0001,gain),at,1.35+i*.16);
+   }catch(_e){}
  });
+
+ // Upper voices leave a little early using AudioParam automation rather than a JS timeout.
+ const speed=clamp(s?.speedNorm||0),still=clamp(s?.still||0);
+ const dwell=clamp(13.4-speed*2.3+still*1.8+Math.random()*2.2,9.8,15.5);
+ const earlyAt=now+Math.max(5,dwell-3.2);
+ Object.keys(spec).slice(2).forEach(freq=>{
+   const node=nightPadNodes.find(n=>n.freq===freq);
+   if(!node)return;
+   try{node.g.gain.setTargetAtTime(.0001,earlyAt,1.65)}catch(_e){}
+ });
+
+ return dwell;
 }
 function scheduleNightPadScene(first=false){
  if(!nightRunning||!nightCtx)return;
  const s=nightState||getState();
- const speed=clamp(s.speedNorm),still=clamp(s.still);
+
  if(!first){
    const dir=s.direction==="forward"?1:-1;
-   // Usually one scene forward/back with the tide; occasionally hold or skip.
    const r=Math.random();
    const step=r<.14?0:r<.88?dir:dir*2;
    nightPadScene=(nightPadScene+step+5)%5;
  }
- applyNightPadScene(nightPadScene,s,{stagger:true});
 
- // 10–15 s scene duration: faster tide moves the harmonic field a little sooner.
- const dwell=clamp(13.4-speed*2.3+still*1.8+Math.random()*2.2,9.8,15.5);
-
- // Let upper voices leave a little early, so the next scene is never a block chord change.
- const generation=nightPadGeneration;
- const earlyId=setTimeout(()=>{
-   if(!nightRunning||generation!==nightPadGeneration)return;
-   const spec=nightPadSceneSpec(nightPadScene,nightState||s);
-   const active=Object.keys(spec);
-   active.slice(2).forEach(freq=>{
-     const node=nightPadNodes.find(n=>n.freq===freq);
-     if(!node)return;
-     const now=nightCtx.currentTime;
-     node.g.gain.cancelScheduledValues(now);
-     node.g.gain.setTargetAtTime(.0001,now,1.9);
-   });
- },Math.max(5,dwell-3.2)*1000);
- nightPadVoiceTimers.push(earlyId);
+ const dwell=applyNightPadScene(nightPadScene,s,{stagger:true})||12;
 
  if(nightPadTimer)clearTimeout(nightPadTimer);
- nightPadTimer=setTimeout(()=>scheduleNightPadScene(false),dwell*1000);
+ // One simple recurrence timer only; watchdog in scheduleNightStep backs it up.
+ nightPadTimer=setTimeout(()=>{
+   nightPadTimer=null;
+   scheduleNightPadScene(false);
+ },dwell*1000);
 }
 function startNightPad(){
  if(!nightCtx||nightPadNodes.length)return;
@@ -1108,8 +1110,8 @@ function stopNightEngine(){
  nightRunning=false;
  if(nightTimer){clearTimeout(nightTimer);nightTimer=null}
  if(nightPadTimer){clearTimeout(nightPadTimer);nightPadTimer=null}
- clearNightPadVoiceTimers();
  nightPadGeneration++;
+ nightPadLastSceneMs=0;
  nightMaster.gain.cancelScheduledValues(nightCtx.currentTime);
  nightMaster.gain.setTargetAtTime(.0001,nightCtx.currentTime,.30);
  const nodes=nightPadNodes.slice();nightPadNodes=[];
