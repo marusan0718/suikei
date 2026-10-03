@@ -749,7 +749,7 @@ let layerFrames=[],layerReadyPromise=null,layerTremTimer=null;
 let autoData=null,lastFetch=0,autoError=null;
 let sim={direction:"forward",speedNorm:.5,levelCm:120,minutesFromExtremum:-20,timeBand:"afternoon",soundMode:"layers",layers:[true,false,false,false,false,false]};
 let activeSoundMode=null,audioSwitchToken=0;
-let nightCtx=null,nightBus=null,nightMaster=null,nightFilter=null,nightPadNodes=[],nightTimer=null,nightPadTimer=null,nightRunning=false,nightPulse=0,nightPattern=null,nightState=null,nightLastNote=4,nightPadScene=0;
+let nightCtx=null,nightBus=null,nightMaster=null,nightFilter=null,nightPadNodes=[],nightTimer=null,nightPadTimer=null,nightPadVoiceTimers=[],nightPadGeneration=0,nightRunning=false,nightPulse=0,nightPattern=null,nightState=null,nightLastNote=4,nightPadScene=0;
 
 const $=q=>document.querySelector(q);
 const clamp=(x,a=0,b=1)=>Math.max(a,Math.min(b,x));
@@ -968,34 +968,57 @@ function scheduleNightStep(){
  nightTimer=setTimeout(scheduleNightStep,stepSec*1000);
 }
 function nightPadSceneSpec(index,s){
- // Open fifth / suspended voicings only: calm, consonant, no horror-like minor beating.
+ // v10: brighter suspended / pentatonic voicings, no sub-bass drone.
  const scenes=[
-   {73.42:.0120,110.00:.0100,164.81:.0065}, // D - A - E
-   {55.00:.0090,82.41:.0105,123.47:.0060},  // A - E - B
-   {82.41:.0095,123.47:.0090,185.00:.0050}, // E - B - F#
-   {73.42:.0110,110.00:.0085,185.00:.0045}  // D - A - F#
+   {146.83:.0068,220.00:.0058,329.63:.0036,369.99:.0022}, // D3 A3 E4 F#4
+   {110.00:.0052,164.81:.0062,246.94:.0038,293.66:.0027}, // A2 E3 B3 D4
+   {164.81:.0059,246.94:.0049,369.99:.0034,440.00:.0018}, // E3 B3 F#4 A4
+   {123.47:.0048,185.00:.0056,220.00:.0037,329.63:.0025}, // B2 F#3 A3 E4
+   {146.83:.0062,220.00:.0050,329.63:.0030,493.88:.0014}  // D3 A3 E4 B4
  ];
  const key=((index%scenes.length)+scenes.length)%scenes.length;
  const base=scenes[key];
  const still=clamp(s?.still||0),speed=clamp(s?.speedNorm||0);
  const high=clamp(((s?.levelCm||120)-150)/70);
- const scale=(.82+speed*.12)*(1-still*.22);
+ const scale=(.92+speed*.08)*(1-still*.18);
  const out={};
  for(const [f,g] of Object.entries(base))out[f]=g*scale;
- // High water adds only a tiny amount of upper air, not tremolo.
- if(high>0)out[329.63]=.0012*high;
+ // High tide adds only a trace of upper air; it never becomes a constant bright layer.
+ if(high>0)out[659.25]=.00055*high;
  return out;
 }
-function applyNightPadScene(index,s,{thin=false}={}){
+function clearNightPadVoiceTimers(){
+ nightPadVoiceTimers.forEach(clearTimeout);
+ nightPadVoiceTimers=[];
+}
+function applyNightPadScene(index,s,{stagger=true}={}){
  if(!nightCtx||!nightPadNodes.length)return;
  const spec=nightPadSceneSpec(index,s);
  const now=nightCtx.currentTime;
- const still=clamp(s?.still||0);
- const thinScale=thin?(.42+still*.10):1;
+ const generation=++nightPadGeneration;
+ clearNightPadVoiceTimers();
+
+ // First let the previous voicing recede gently.
  nightPadNodes.forEach(node=>{
-   const target=Math.max(.0001,(spec[node.freq]||0)*thinScale);
-   node.g.gain.cancelScheduledValues(now);
-   node.g.gain.setTargetAtTime(target,now,thin?2.8:4.8);
+   const target=spec[node.freq]||0;
+   if(!target){
+     node.g.gain.cancelScheduledValues(now);
+     node.g.gain.setTargetAtTime(.0001,now,2.1);
+   }
+ });
+
+ const active=Object.entries(spec);
+ active.forEach(([freq,gain],i)=>{
+   const delay=stagger?[0,.7,1.6,2.5,.9][i%5]:0;
+   const id=setTimeout(()=>{
+     if(!nightRunning||generation!==nightPadGeneration)return;
+     const node=nightPadNodes.find(n=>n.freq===freq);
+     if(!node)return;
+     const t=nightCtx.currentTime;
+     node.g.gain.cancelScheduledValues(t);
+     node.g.gain.setTargetAtTime(Math.max(.0001,gain),t,1.55+i*.18);
+   },delay*1000);
+   nightPadVoiceTimers.push(id);
  });
 }
 function scheduleNightPadScene(first=false){
@@ -1004,21 +1027,31 @@ function scheduleNightPadScene(first=false){
  const speed=clamp(s.speedNorm),still=clamp(s.still);
  if(!first){
    const dir=s.direction==="forward"?1:-1;
-   // Usually move one scene; occasionally hold or skip one to avoid a predictable cycle.
+   // Usually one scene forward/back with the tide; occasionally hold or skip.
    const r=Math.random();
-   const step=r<.18?0:r<.86?dir:dir*2;
-   nightPadScene=(nightPadScene+step+4)%4;
+   const step=r<.14?0:r<.88?dir:dir*2;
+   nightPadScene=(nightPadScene+step+5)%5;
  }
- applyNightPadScene(nightPadScene,s,{thin:false});
+ applyNightPadScene(nightPadScene,s,{stagger:true});
 
- // A single shallow "ebb" inside each scene creates a breath without repetitive LFO pumping.
- const dwell=clamp(30-speed*8+still*5+Math.random()*5,20,36);
- const ebbAt=dwell*(.48+Math.random()*.14);
- const sceneToken=nightPadScene;
- setTimeout(()=>{
-   if(!nightRunning||sceneToken!==nightPadScene)return;
-   applyNightPadScene(nightPadScene,nightState||s,{thin:true});
- },ebbAt*1000);
+ // 10–15 s scene duration: faster tide moves the harmonic field a little sooner.
+ const dwell=clamp(13.4-speed*2.3+still*1.8+Math.random()*2.2,9.8,15.5);
+
+ // Let upper voices leave a little early, so the next scene is never a block chord change.
+ const generation=nightPadGeneration;
+ const earlyId=setTimeout(()=>{
+   if(!nightRunning||generation!==nightPadGeneration)return;
+   const spec=nightPadSceneSpec(nightPadScene,nightState||s);
+   const active=Object.keys(spec);
+   active.slice(2).forEach(freq=>{
+     const node=nightPadNodes.find(n=>n.freq===freq);
+     if(!node)return;
+     const now=nightCtx.currentTime;
+     node.g.gain.cancelScheduledValues(now);
+     node.g.gain.setTargetAtTime(.0001,now,1.9);
+   });
+ },Math.max(5,dwell-3.2)*1000);
+ nightPadVoiceTimers.push(earlyId);
 
  if(nightPadTimer)clearTimeout(nightPadTimer);
  nightPadTimer=setTimeout(()=>scheduleNightPadScene(false),dwell*1000);
@@ -1026,18 +1059,20 @@ function scheduleNightPadScene(first=false){
 function startNightPad(){
  if(!nightCtx||nightPadNodes.length)return;
  const specs=[
-   {f:55.00,pan:-.30},{f:73.42,pan:-.24},{f:82.41,pan:-.12},
-   {f:110.00,pan:.08},{f:123.47,pan:.18},{f:164.81,pan:.30},
-   {f:185.00,pan:.36},{f:329.63,pan:.52}
+   {f:110.00,pan:-.30},{f:123.47,pan:-.26},{f:146.83,pan:-.34},
+   {f:164.81,pan:-.05},{f:185.00,pan:.00},{f:220.00,pan:.06},
+   {f:246.94,pan:.24},{f:293.66,pan:.42},{f:329.63,pan:.28},
+   {f:369.99,pan:.44},{f:440.00,pan:.46},{f:493.88,pan:.50},
+   {f:659.25,pan:.62}
  ];
  specs.forEach(sp=>{
    const o=nightCtx.createOscillator(),g=nightCtx.createGain(),p=nightCtx.createStereoPanner();
    o.type="sine";o.frequency.value=sp.f;p.pan.value=sp.pan;g.gain.value=.0001;
    o.connect(g).connect(p).connect(nightBus);
    o.start();
-   nightPadNodes.push({o,g,p,f:String(sp.f)});
+   nightPadNodes.push({o,g,p,f:sp.f,freq:String(sp.f)});
  });
- nightPadScene=Math.floor(Math.random()*4);
+ nightPadScene=Math.floor(Math.random()*5);
  scheduleNightPadScene(true);
 }
 function updateNightState(s){
@@ -1047,8 +1082,15 @@ function updateNightState(s){
  const still=clamp(s.still),speed=clamp(s.speedNorm);
  const target=.76*(1-still*.12);
  nightMaster.gain.setTargetAtTime(target,now,.8);
- nightFilter.frequency.setTargetAtTime(3500+speed*900,now,1.0);
- if(nightRunning&&nightPadNodes.length)applyNightPadScene(nightPadScene,s,{thin:false});
+ nightFilter.frequency.setTargetAtTime(3900+speed*800,now,1.0);
+ // Tide changes alter the level of the current voicing without resetting its staggered motion.
+ if(nightRunning&&nightPadNodes.length){
+   const spec=nightPadSceneSpec(nightPadScene,s);
+   nightPadNodes.forEach(node=>{
+     if(!(node.freq in spec))return;
+     node.g.gain.setTargetAtTime(Math.max(.0001,spec[node.freq]),now,2.2);
+   });
+ }
 }
 async function startNightEngine(s){
  await ensureNightAudio();
@@ -1066,6 +1108,8 @@ function stopNightEngine(){
  nightRunning=false;
  if(nightTimer){clearTimeout(nightTimer);nightTimer=null}
  if(nightPadTimer){clearTimeout(nightPadTimer);nightPadTimer=null}
+ clearNightPadVoiceTimers();
+ nightPadGeneration++;
  nightMaster.gain.cancelScheduledValues(nightCtx.currentTime);
  nightMaster.gain.setTargetAtTime(.0001,nightCtx.currentTime,.30);
  const nodes=nightPadNodes.slice();nightPadNodes=[];
