@@ -749,7 +749,7 @@ let layerFrames=[],layerReadyPromise=null,layerTremTimer=null;
 let autoData=null,lastFetch=0,autoError=null;
 let sim={direction:"forward",speedNorm:.5,levelCm:120,minutesFromExtremum:-20,timeBand:"afternoon",soundMode:"layers",layers:[true,false,false,false,false,false]};
 let activeSoundMode=null,audioSwitchToken=0;
-let nightCtx=null,nightBus=null,nightMaster=null,nightFilter=null,nightPadNodes=[],nightTimer=null,nightRunning=false,nightPulse=0,nightPattern=null,nightState=null,nightLastNote=4;
+let nightCtx=null,nightBus=null,nightMaster=null,nightFilter=null,nightPadNodes=[],nightTimer=null,nightPadTimer=null,nightRunning=false,nightPulse=0,nightPattern=null,nightState=null,nightLastNote=4,nightPadScene=0;
 
 const $=q=>document.querySelector(q);
 const clamp=(x,a=0,b=1)=>Math.max(a,Math.min(b,x));
@@ -967,23 +967,78 @@ function scheduleNightStep(){
  const stepSec=clamp(.50-speed*.14+still*.10,.35,.61);
  nightTimer=setTimeout(scheduleNightStep,stepSec*1000);
 }
+function nightPadSceneSpec(index,s){
+ // Open fifth / suspended voicings only: calm, consonant, no horror-like minor beating.
+ const scenes=[
+   {73.42:.0120,110.00:.0100,164.81:.0065}, // D - A - E
+   {55.00:.0090,82.41:.0105,123.47:.0060},  // A - E - B
+   {82.41:.0095,123.47:.0090,185.00:.0050}, // E - B - F#
+   {73.42:.0110,110.00:.0085,185.00:.0045}  // D - A - F#
+ ];
+ const key=((index%scenes.length)+scenes.length)%scenes.length;
+ const base=scenes[key];
+ const still=clamp(s?.still||0),speed=clamp(s?.speedNorm||0);
+ const high=clamp(((s?.levelCm||120)-150)/70);
+ const scale=(.82+speed*.12)*(1-still*.22);
+ const out={};
+ for(const [f,g] of Object.entries(base))out[f]=g*scale;
+ // High water adds only a tiny amount of upper air, not tremolo.
+ if(high>0)out[329.63]=.0012*high;
+ return out;
+}
+function applyNightPadScene(index,s,{thin=false}={}){
+ if(!nightCtx||!nightPadNodes.length)return;
+ const spec=nightPadSceneSpec(index,s);
+ const now=nightCtx.currentTime;
+ const still=clamp(s?.still||0);
+ const thinScale=thin?(.42+still*.10):1;
+ nightPadNodes.forEach(node=>{
+   const target=Math.max(.0001,(spec[node.freq]||0)*thinScale);
+   node.g.gain.cancelScheduledValues(now);
+   node.g.gain.setTargetAtTime(target,now,thin?2.8:4.8);
+ });
+}
+function scheduleNightPadScene(first=false){
+ if(!nightRunning||!nightCtx)return;
+ const s=nightState||getState();
+ const speed=clamp(s.speedNorm),still=clamp(s.still);
+ if(!first){
+   const dir=s.direction==="forward"?1:-1;
+   // Usually move one scene; occasionally hold or skip one to avoid a predictable cycle.
+   const r=Math.random();
+   const step=r<.18?0:r<.86?dir:dir*2;
+   nightPadScene=(nightPadScene+step+4)%4;
+ }
+ applyNightPadScene(nightPadScene,s,{thin:false});
+
+ // A single shallow "ebb" inside each scene creates a breath without repetitive LFO pumping.
+ const dwell=clamp(30-speed*8+still*5+Math.random()*5,20,36);
+ const ebbAt=dwell*(.48+Math.random()*.14);
+ const sceneToken=nightPadScene;
+ setTimeout(()=>{
+   if(!nightRunning||sceneToken!==nightPadScene)return;
+   applyNightPadScene(nightPadScene,nightState||s,{thin:true});
+ },ebbAt*1000);
+
+ if(nightPadTimer)clearTimeout(nightPadTimer);
+ nightPadTimer=setTimeout(()=>scheduleNightPadScene(false),dwell*1000);
+}
 function startNightPad(){
  if(!nightCtx||nightPadNodes.length)return;
  const specs=[
-   {f:73.42,pan:-.34,g:.0130,lfo:1/16.5},
-   {f:110.00,pan:.10,g:.0110,lfo:1/19.2},
-   {f:164.81,pan:.32,g:.0080,lfo:1/22.0}
+   {f:55.00,pan:-.30},{f:73.42,pan:-.24},{f:82.41,pan:-.12},
+   {f:110.00,pan:.08},{f:123.47,pan:.18},{f:164.81,pan:.30},
+   {f:185.00,pan:.36},{f:329.63,pan:.52}
  ];
- specs.forEach((sp,i)=>{
+ specs.forEach(sp=>{
    const o=nightCtx.createOscillator(),g=nightCtx.createGain(),p=nightCtx.createStereoPanner();
-   const lfo=nightCtx.createOscillator(),depth=nightCtx.createGain();
-   o.type="sine";o.frequency.value=sp.f;p.pan.value=sp.pan;g.gain.value=sp.g;
-   lfo.type="sine";lfo.frequency.value=sp.lfo;depth.gain.value=sp.g*.28;
-   lfo.connect(depth).connect(g.gain);
+   o.type="sine";o.frequency.value=sp.f;p.pan.value=sp.pan;g.gain.value=.0001;
    o.connect(g).connect(p).connect(nightBus);
-   o.start();lfo.start();
-   nightPadNodes.push(o,g,p,lfo,depth);
+   o.start();
+   nightPadNodes.push({o,g,p,f:String(sp.f)});
  });
+ nightPadScene=Math.floor(Math.random()*4);
+ scheduleNightPadScene(true);
 }
 function updateNightState(s){
  nightState={...s};
@@ -993,6 +1048,7 @@ function updateNightState(s){
  const target=.76*(1-still*.12);
  nightMaster.gain.setTargetAtTime(target,now,.8);
  nightFilter.frequency.setTargetAtTime(3500+speed*900,now,1.0);
+ if(nightRunning&&nightPadNodes.length)applyNightPadScene(nightPadScene,s,{thin:false});
 }
 async function startNightEngine(s){
  await ensureNightAudio();
@@ -1009,11 +1065,17 @@ function stopNightEngine(){
  if(!nightCtx||!nightMaster)return;
  nightRunning=false;
  if(nightTimer){clearTimeout(nightTimer);nightTimer=null}
+ if(nightPadTimer){clearTimeout(nightPadTimer);nightPadTimer=null}
  nightMaster.gain.cancelScheduledValues(nightCtx.currentTime);
  nightMaster.gain.setTargetAtTime(.0001,nightCtx.currentTime,.30);
  const nodes=nightPadNodes.slice();nightPadNodes=[];
  setTimeout(()=>{
-   nodes.forEach(n=>{try{if(n&&typeof n.stop==="function")n.stop()}catch(_e){}try{n?.disconnect?.()}catch(_e){}});
+   nodes.forEach(n=>{
+     try{n.o?.stop?.()}catch(_e){}
+     try{n.o?.disconnect?.()}catch(_e){}
+     try{n.g?.disconnect?.()}catch(_e){}
+     try{n.p?.disconnect?.()}catch(_e){}
+   });
  },900);
 }
 function muteLayerEngines(s){
