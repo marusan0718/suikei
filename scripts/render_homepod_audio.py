@@ -4,7 +4,7 @@ from scipy.signal import butter, sosfilt
 from scipy.io import wavfile
 
 SR=24000
-DUR=90.0
+DUR=300.0
 FADE=12.0
 RAW_DUR=DUR+FADE
 N=int(RAW_DUR*SR)
