@@ -633,87 +633,13 @@ body.playing .ring-level small{
 
 
 <style>
-/* AirPlay-compatible media path */
-.top-right-hotspot{
-  width:150px;
-  height:100px;
-}
-.corner-actions{
-  display:flex;
-  gap:7px;
-  align-items:center;
-}
-.corner-btn{
-  width:36px;
-  height:36px;
-  border:1px solid var(--glass-line);
-  border-radius:12px;
-  background:color-mix(in srgb,var(--glass) 82%,transparent);
-  color:var(--muted);
-  backdrop-filter:blur(18px);
-  -webkit-backdrop-filter:blur(18px);
-  box-shadow:none;
-  opacity:0;
-  transform:translateY(-4px) scale(.96);
-  pointer-events:none;
-  transition:opacity .18s ease,transform .18s ease,background .18s ease;
-}
-.top-right-hotspot:hover .corner-btn,
-.top-right-hotspot:focus-within .corner-btn{
-  opacity:.9;
-  transform:translateY(0) scale(1);
-  pointer-events:auto;
-}
-.corner-btn:hover{
-  opacity:1!important;
-  background:color-mix(in srgb,var(--glass) 78%,var(--ring-hi) 22%);
-}
-.airplay-btn.active{
-  color:var(--ring-hi);
-  background:color-mix(in srgb,var(--glass) 70%,var(--ring) 30%);
-}
-.airplay-glyph{
-  position:relative;
-  display:block;
-  width:18px;
-  height:17px;
-  margin:auto;
-}
-.airplay-glyph:before{
-  content:"";
-  position:absolute;
-  left:1px;right:1px;top:1px;height:10px;
-  border:1.4px solid currentColor;
-  border-radius:2px;
-}
-.airplay-glyph:after{
-  content:"";
-  position:absolute;
-  left:50%;bottom:0;
-  transform:translateX(-50%);
-  width:0;height:0;
-  border-left:5px solid transparent;
-  border-right:5px solid transparent;
-  border-bottom:7px solid currentColor;
-}
-@media (hover:none){
-  .corner-btn{
-    opacity:.28;
-    transform:none;
-    pointer-events:auto;
-  }
-}
+/* Audio output routing is handled by the operating system. */
 </style>
 
 </head>
-<body><audio id="airplayAudio" preload="auto" loop playsinline x-webkit-airplay="allow" style="display:none"></audio>
-<main>
+<body><main>
   <div id="topRightHotspot" class="top-right-hotspot">
-    <div class="corner-actions">
-      <button id="airplayBtn" class="corner-btn airplay-btn" aria-label="AirPlay" hidden>
-        <span class="airplay-glyph" aria-hidden="true"><i></i></span>
-      </button>
-      <button id="fullscreenBtn" class="corner-btn fullscreen-btn" aria-label="フルスクリーン">⛶</button>
+    <div class="corner-actions"><button id="fullscreenBtn" class="corner-btn fullscreen-btn" aria-label="フルスクリーン">⛶</button>
     </div>
   </div>
 
@@ -800,30 +726,11 @@ const LAYER_PAYLOADS=["PCFET0NUWVBFIGh0bWw+CjxodG1sIGxhbmc9ImphIj4KPGhlYWQ+CjxtZ
 const API="https://marine-api.open-meteo.com/v1/marine";
 const LAT=35.64,LON=139.76;
 const DATUM_OFFSET_CM=114.1;
-const HOMEPOD_TRACKS={
-  morning:{
-    forward:"homepod-audio/homepod-morning.m4a",
-    reverse:"homepod-audio/homepod-morning-reverse.m4a"
-  },
-  afternoon:{
-    forward:"homepod-audio/homepod-afternoon.m4a",
-    reverse:"homepod-audio/homepod-afternoon-reverse.m4a"
-  },
-  evening:{
-    forward:"homepod-audio/homepod-evening.m4a",
-    reverse:"homepod-audio/homepod-evening-reverse.m4a"
-  },
-  offhours:{
-    forward:"homepod-audio/homepod-offhours.m4a",
-    reverse:"homepod-audio/homepod-offhours-reverse.m4a"
-  }
-};
-const TIME_LABEL={morning:"朝",afternoon:"昼",evening:"夜",offhours:"深夜"};
 
 const IPAD_AUDIO_OPTIMIZED=/iPad|iPhone|iPod/.test(navigator.userAgent)||(navigator.platform==="MacIntel"&&navigator.maxTouchPoints>1);
 window.__suikeiUseSharedAudio=IPAD_AUDIO_OPTIMIZED;
 window.__suikeiSharedCtx=null;
-let mode="auto",playing=false,airplayWireless=false,airplayAvailable=false,airplayTremTimer=null;
+let mode="auto",playing=false;
 let ctx=null,bufferF=null,bufferR=null,master=null,compressor=null,sources=[];
 let tremOsc=null,tremNodes=[];
 let layerFrames=[],layerReadyPromise=null,layerTremTimer=null;
@@ -966,121 +873,9 @@ function pushLayerState(s,tremMul=1){
    catch(_e){}
  })
 }
-function currentAirplaySrc(stateOrDirection){
-  const s=typeof stateOrDirection==="string"?{direction:stateOrDirection,timeBand:getState().timeBand}:stateOrDirection;
-  const band=HOMEPOD_TRACKS[s.timeBand]?s.timeBand:"afternoon";
-  const dir=s.direction==="reverse"?"reverse":"forward";
-  return new URL(HOMEPOD_TRACKS[band][dir],location.href).href;
-}
-function stopAirplayTremolo(){
-  if(airplayTremTimer){clearInterval(airplayTremTimer);airplayTremTimer=null}
-}
-function updateAirplayMedia(forceSource=false){
-  const a=$("#airplayAudio"),s=getState();
-  const wanted=currentAirplaySrc(s);
-  const current=a.src || new URL(a.getAttribute("src")||"",location.href).href;
-  if(forceSource || current!==wanted){
-    const wasPlaying=!a.paused;
-    const oldTime=a.currentTime||0;
-    a.src=wanted;
-    a.load();
-    const resume=()=>{
-      if(Number.isFinite(a.duration)&&a.duration>0){
-        try{a.currentTime=Math.min(oldTime%a.duration,Math.max(0,a.duration-.25))}catch(_e){}
-      }
-      if(wasPlaying||playing)a.play().catch(()=>{});
-    };
-    if(a.readyState>=1)resume();
-    else a.addEventListener("loadedmetadata",resume,{once:true});
-  }
-  a.loop=true;
-  // HomePod/AirPlay stays at native speed to avoid Safari/AirPlay varispeed artifacts.
-  a.playbackRate=1.0;
-  a.defaultPlaybackRate=1.0;
-  if("preservesPitch" in a)a.preservesPitch=true;
-  if("webkitPreservesPitch" in a)a.webkitPreservesPitch=true;
-
-  stopAirplayTremolo();
-  // Extra headroom for HomePod's own DSP / loudness processing.
-  const baseVol=clamp(.80*(1-.18*s.still),.50,.82);
-  if(s.levelCm>150){
-    const strength=clamp((s.levelCm-150)/70);
-    const started=performance.now();
-    airplayTremTimer=setInterval(()=>{
-      const phase=(performance.now()-started)/1000*2*Math.PI*.70;
-      a.volume=clamp(baseVol*(1+.045*strength*Math.sin(phase)),0,1);
-    },80);
-  }else{
-    a.volume=baseVol;
-  }
-  if("mediaSession" in navigator){
-    try{
-      navigator.mediaSession.metadata=new MediaMetadata({
-        title:"水景 — "+(TIME_LABEL[s.timeBand]||"昼"),
-        artist:"Suikei / Tokyo Bay",
-        album:s.direction==="forward"?"上潮":"下潮"
-      });
-      navigator.mediaSession.playbackState=playing?"playing":"paused";
-    }catch(_e){}
-  }
-}
-async function enterAirplayPath(){
-  airplayWireless=true;
-  clearTrem();
-  await stopSources();
-  updateAirplayMedia(true);
-  if(playing){
-    try{await $("#airplayAudio").play()}catch(_e){}
-  }
-  $("#airplayBtn")?.classList.add("active");
-  render();
-}
-function leaveAirplayPath(){
-  airplayWireless=false;
-  stopAirplayTremolo();
-  const a=$("#airplayAudio");
-  try{a.pause()}catch(_e){}
-  $("#airplayBtn")?.classList.remove("active");
-  if(playing)startSources();
-  render();
-}
-function setupAirplay(){
-  const a=$("#airplayAudio"),btn=$("#airplayBtn");
-  const initial=getState();
-  a.setAttribute("src",currentAirplaySrc(initial));
-  a.load();
-
-  if(window.WebKitPlaybackTargetAvailabilityEvent &&
-     typeof a.webkitShowPlaybackTargetPicker==="function"){
-    a.addEventListener("webkitplaybacktargetavailabilitychanged",e=>{
-      airplayAvailable=e.availability==="available";
-      btn.hidden=!airplayAvailable;
-    });
-    a.addEventListener("webkitcurrentplaybacktargetiswirelesschanged",()=>{
-      const wireless=!!a.webkitCurrentPlaybackTargetIsWireless;
-      if(wireless&&!airplayWireless)enterAirplayPath();
-      else if(!wireless&&airplayWireless)leaveAirplayPath();
-    });
-    btn.addEventListener("click",e=>{
-      e.stopPropagation();
-      try{
-        updateAirplayMedia(false);
-        a.webkitShowPlaybackTargetPicker();
-      }catch(err){console.warn("AirPlay picker unavailable",err)}
-    });
-  }else{
-    btn.hidden=true;
-  }
-}
-
 function applyAudio(initial=false){
  const s=getState();
  clearTrem();
- if(airplayWireless){
-   if(playing)updateAirplayMedia(false);
-   render();
-   return
- }
  if(playing){
    pushLayerState(s,1);
    if(s.levelCm>150){
@@ -1138,7 +933,7 @@ async function fetchAuto(){
      fetchedAt:Date.now()
    };
    lastFetch=Date.now();autoError=null;
-   applyAudio();
+   if(playing&&prevDir!=null&&prevDir!==autoData.rising)startSources();else applyAudio();
  }catch(e){autoError=e;render()}
 }
 function fmtTime(ms){
@@ -1172,32 +967,28 @@ function render(){
  $("#detailLevel").textContent=Math.round(s.levelCm)+" cm";
  $("#detailDirection").textContent=still?"潮止まり":dir;
  $("#detailNext").textContent=mode==="auto"&&autoData?.next?autoData.next.type+" "+fmtTime(autoData.next.time):"--";
- $("#detailEffect").textContent=(airplayWireless?"AirPlay · ":"")+(trem?"揺らぎ ON":"通常");
+ $("#detailEffect").textContent=trem?"揺らぎ ON":"通常";
  $("#detailUpdate").textContent=mode==="auto"&&autoData?fmtTime(autoData.fetchedAt):"--";
 }
 
 async function togglePlay(){
  await ensureAudio();
- const a=$("#airplayAudio");
  if(!playing){
    playing=true;
-   if(airplayWireless){updateAirplayMedia(false);try{await a.play()}catch(_e){}}
-   else await startSources()
+   await startSources();
  }else{
    playing=false;
    clearTrem();
    await stopSources();
-   stopAirplayTremolo();
-   try{a.pause()}catch(_e){}
  }
- render()
+ render();
 }
 function setMode(m){
  mode=m;
  $("#autoBtn").classList.toggle("active",m==="auto");
  $("#simBtn").classList.toggle("active",m==="sim");
  $("#simPanel").classList.toggle("show",m==="sim");
- if(playing){if(airplayWireless)updateAirplayMedia(true);else applyAudio()}else render();
+ if(playing)startSources();else render();
  if(m==="auto"&&Date.now()-lastFetch>10*60*1000)fetchAuto();
 }
 $("#ringButton").addEventListener("click",togglePlay);
@@ -1211,16 +1002,14 @@ $("#simStill").addEventListener("input",e=>{sim.minutesFromExtremum=+e.target.va
 $("#simDirection").addEventListener("click",e=>{
  const b=e.target.closest("button");if(!b)return;sim.direction=b.dataset.v;
  [...$("#simDirection").querySelectorAll("button")].forEach(x=>x.classList.toggle("active",x===b));
- if(playing){if(airplayWireless)updateAirplayMedia(true);else applyAudio()}else render();
+ if(playing)startSources();else render();
 });
 $("#simTimeBand").addEventListener("click",e=>{
  const b=e.target.closest("button");if(!b)return;
  sim.timeBand=b.dataset.v;
  [...$("#simTimeBand").querySelectorAll("button")].forEach(x=>x.classList.toggle("active",x===b));
- if(playing){
-   if(airplayWireless)updateAirplayMedia(true);
-   else applyAudio();
- }else render();
+ if(playing)applyAudio();
+ else render();
 });
 
 
@@ -1244,14 +1033,7 @@ document.addEventListener("fullscreenchange",()=>{
   $("#fullscreenBtn").setAttribute("aria-label",on?"フルスクリーンを終了":"フルスクリーン");
 });
 
-if("mediaSession" in navigator){
- try{
-   navigator.mediaSession.setActionHandler("play",async()=>{if(!playing)await togglePlay()});
-   navigator.mediaSession.setActionHandler("pause",async()=>{if(playing)await togglePlay()});
- }catch(_e){}
-}
 if(!IPAD_AUDIO_OPTIMIZED)initLayerEngines();
-setupAirplay();
 
 // API: 10分に1回取得。UI/音の状態はローカル計算で1分ごとに更新。
 fetchAuto();
