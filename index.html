@@ -1013,7 +1013,6 @@ function stopNightEngine(){
  nightMaster.gain.setTargetAtTime(.0001,nightCtx.currentTime,.30);
  const nodes=nightPadNodes.slice();nightPadNodes=[];
  setTimeout(()=>{
-   if(nightRunning)return;
    nodes.forEach(n=>{try{if(n&&typeof n.stop==="function")n.stop()}catch(_e){}try{n?.disconnect?.()}catch(_e){}});
  },900);
 }
