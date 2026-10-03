@@ -1063,18 +1063,19 @@ async function toggleOutputMode(){
  const a=$("#homepodAudio");
  if(outputMode==="realtime"){
    outputMode="homepod";
-   // Prepare a real HTMLMediaElement before showing Apple's route picker.
+   // Prepare the real media element and invoke Apple's picker BEFORE the first await,
+   // so Safari still sees this as the user's direct tap.
    const s=getState(),info=homePodTrackFor(s);
    if(a.src!==new URL(info.src,location.href).href){a.src=info.src;a.load()}
    homePodTrackKey=info.key;
-   if(playing){
-     await stopSources();
-     await startHomePod()
-   }
    render();
    try{
      if(typeof a.webkitShowPlaybackTargetPicker==="function")a.webkitShowPlaybackTargetPicker();
    }catch(err){console.warn("AirPlay picker unavailable",err)}
+   if(playing){
+     await stopSources();
+     await startHomePod()
+   }
  }else{
    outputMode="realtime";
    stopHomePod();
