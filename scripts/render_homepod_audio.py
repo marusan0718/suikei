@@ -252,8 +252,11 @@ for name,w in weights.items():
     mix*=global_scale
     mix=np.tanh(mix*1.05).astype(np.float32)/np.tanh(1.05)
     out=circularize(mix)
-    wav=OUT/f'homepod-{name}.wav'; m4a=OUT/f'homepod-{name}.m4a'
+    wav=OUT/f'homepod-{name}.wav'
+    m4a=OUT/f'homepod-{name}.m4a'
+    reverse_m4a=OUT/f'homepod-{name}-reverse.m4a'
     wavfile.write(wav,SR,(np.clip(out,-1,1)*32767).astype(np.int16))
     subprocess.run(['ffmpeg','-y','-hide_banner','-loglevel','error','-i',str(wav),'-c:a','aac','-b:a','48k','-ar','44100',str(m4a)],check=True)
+    subprocess.run(['ffmpeg','-y','-hide_banner','-loglevel','error','-i',str(wav),'-af','areverse','-c:a','aac','-b:a','48k','-ar','44100',str(reverse_m4a)],check=True)
     wav.unlink()
-    print(name,m4a.stat().st_size,'bytes', 'peak',float(np.max(np.abs(out))), 'rms',float(np.sqrt(np.mean(out**2))))
+    print(name,m4a.stat().st_size,'bytes',reverse_m4a.stat().st_size,'reverse bytes','peak',float(np.max(np.abs(out))), 'rms',float(np.sqrt(np.mean(out**2))))
