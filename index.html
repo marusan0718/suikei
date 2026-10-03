@@ -176,6 +176,8 @@ input[type=range]{width:100%;accent-color:var(--ring)}
 }
 .segment button.active{background:var(--glass);color:var(--ink)}
 .layer-solo{grid-template-columns:repeat(6,1fr)}
+.layer-solo.disabled{opacity:.34;pointer-events:none;filter:saturate(.65)}
+.layer-solo{transition:opacity .18s ease,filter .18s ease}
 @media(max-width:560px){
   .layer-solo{grid-template-columns:repeat(3,1fr)}
 }
@@ -710,6 +712,10 @@ body.playing .ring-level small{
       <input id="simStill" type="range" min="-20" max="20" value="-20">
       <output id="simStillV">-20 min</output>
     </div>
+    <div class="segment" id="simSoundMode">
+      <button class="active" data-v="layers">6層</button>
+      <button data-v="night">夜の粒感</button>
+    </div>
     <div class="segment" id="simDirection">
       <button class="active" data-v="forward">上潮</button>
       <button data-v="reverse">下潮</button>
@@ -741,7 +747,9 @@ let ctx=null,bufferF=null,bufferR=null,master=null,compressor=null,sources=[];
 let tremOsc=null,tremNodes=[];
 let layerFrames=[],layerReadyPromise=null,layerTremTimer=null;
 let autoData=null,lastFetch=0,autoError=null;
-let sim={direction:"forward",speedNorm:.5,levelCm:120,minutesFromExtremum:-20,timeBand:"afternoon",layers:[true,false,false,false,false,false]};
+let sim={direction:"forward",speedNorm:.5,levelCm:120,minutesFromExtremum:-20,timeBand:"afternoon",soundMode:"layers",layers:[true,false,false,false,false,false]};
+let activeSoundMode=null,audioSwitchToken=0;
+let nightCtx=null,nightBus=null,nightMaster=null,nightFilter=null,nightPadNodes=[],nightTimer=null,nightRunning=false,nightPulse=0,nightPattern=null,nightState=null,nightLastNote=4;
 
 const $=q=>document.querySelector(q);
 const clamp=(x,a=0,b=1)=>Math.max(a,Math.min(b,x));
@@ -806,7 +814,218 @@ async function stopSources(){
    try{const w=frame.contentWindow;if(w?.__suikeiRunning?.())await w.__suikeiStop()}catch(_e){}
  }))
 }
+
 function clearTrem(){if(layerTremTimer){clearInterval(layerTremTimer);layerTremTimer=null}}
+
+function tokyoHour(){
+ return Number(new Intl.DateTimeFormat("en-GB",{timeZone:"Asia/Tokyo",hour:"2-digit",hour12:false}).format(new Date()));
+}
+function inAutoNightWindow(){
+ const h=tokyoHour();
+ return h>=22||h<7;
+}
+function shouldUseNightSound(s){
+ return mode==="sim" ? sim.soundMode==="night" : inAutoNightWindow();
+}
+function nightNoteFreq(i){
+ const scale=[146.83,164.81,185.00,220.00,246.94,293.66,329.63,369.99,440.00,493.88,587.33,659.25,739.99];
+ return scale[clamp(Math.round(i),0,scale.length-1)];
+}
+function nightNextNote(lo,hi,s){
+ lo=Math.max(0,lo);hi=Math.min(12,hi);
+ if(nightLastNote<lo||nightLastNote>hi)nightLastNote=Math.round((lo+hi)/2);
+ const rising=s.direction==="forward";
+ const moves=rising?[1,1,2,0,-1]:[-1,-1,-2,0,1];
+ let next=clamp(nightLastNote+moves[Math.floor(Math.random()*moves.length)],lo,hi);
+ if(next===nightLastNote&&Math.random()<.65)next=clamp(next+(rising?1:-1),lo,hi);
+ nightLastNote=next;
+ return nightNoteFreq(next);
+}
+async function ensureNightAudio(){
+ if(!nightCtx){
+   if(IPAD_AUDIO_OPTIMIZED){
+     if(!window.__suikeiSharedCtx){
+       window.__suikeiSharedCtx=new (window.AudioContext||window.webkitAudioContext)({latencyHint:"playback"});
+     }
+     nightCtx=window.__suikeiSharedCtx;
+   }else{
+     nightCtx=new (window.AudioContext||window.webkitAudioContext)({latencyHint:"playback"});
+   }
+
+   nightBus=nightCtx.createGain();
+   nightFilter=nightCtx.createBiquadFilter();
+   nightMaster=nightCtx.createGain();
+   nightFilter.type="lowpass";
+   nightFilter.frequency.value=3900;
+   nightFilter.Q.value=.18;
+   nightMaster.gain.value=.0001;
+   nightBus.connect(nightFilter).connect(nightMaster).connect(nightCtx.destination);
+
+   // Lightweight room: short taps instead of a convolution reverb.
+   [[.14,.060,-.28],[.31,.038,.32],[.68,.018,-.12],[1.12,.009,.18]].forEach(([delay,gain,pan])=>{
+     const d=nightCtx.createDelay(1.5),g=nightCtx.createGain(),p=nightCtx.createStereoPanner();
+     d.delayTime.value=delay;g.gain.value=gain;p.pan.value=pan;
+     nightBus.connect(d).connect(g).connect(p).connect(nightMaster);
+   });
+ }
+ if(nightCtx.state==="suspended")await nightCtx.resume();
+}
+function nightEnvelope(g,start,peak,attack,decay,sustain,release,duration){
+ g.gain.cancelScheduledValues(start);
+ g.gain.setValueAtTime(.0001,start);
+ g.gain.exponentialRampToValueAtTime(Math.max(.0002,peak),start+attack);
+ g.gain.exponentialRampToValueAtTime(Math.max(.0002,peak*sustain),start+attack+decay);
+ g.gain.setValueAtTime(Math.max(.0002,peak*sustain),start+duration);
+ g.gain.exponentialRampToValueAtTime(.0001,start+duration+release);
+}
+function nightTone({freq,time,peak=.05,duration=.18,attack=.005,decay=.17,sustain=.018,release=.48,pan=0,type="sine"}){
+ if(!nightRunning||!nightCtx)return;
+ const o=nightCtx.createOscillator(),g=nightCtx.createGain(),p=nightCtx.createStereoPanner();
+ o.type=type;o.frequency.value=freq;p.pan.value=clamp(pan,-1,1);
+ nightEnvelope(g,time,peak,attack,decay,sustain,release,duration);
+ o.connect(g).connect(p).connect(nightBus);
+ o.start(time);o.stop(time+duration+release+.12);
+}
+function nightWood(time,peak=.032,pan=0){
+ if(!nightRunning||!nightCtx)return;
+ const len=Math.floor(nightCtx.sampleRate*.15);
+ const b=nightCtx.createBuffer(1,len,nightCtx.sampleRate),data=b.getChannelData(0);
+ for(let i=0;i<len;i++)data[i]=Math.random()*2-1;
+ const src=nightCtx.createBufferSource(),hp=nightCtx.createBiquadFilter(),g=nightCtx.createGain(),p=nightCtx.createStereoPanner();
+ hp.type="highpass";hp.frequency.value=420;hp.Q.value=.35;p.pan.value=clamp(pan,-1,1);
+ src.buffer=b;nightEnvelope(g,time,peak,.002,.045,.01,.05,.055);
+ src.connect(hp).connect(g).connect(p).connect(nightBus);
+ src.start(time);src.stop(time+.18);
+}
+function nightSparkle(time,s){
+ const levelBoost=clamp((s.levelCm-150)/70);
+ const notes=s.direction==="forward"?[440,587.33,659.25]:[659.25,587.33,440];
+ const f=notes[Math.floor(Math.random()*notes.length)];
+ const pan=(Math.random()<.5?-1:1)*(.50+Math.random()*.24);
+ const peak=.0105+levelBoost*.0025;
+ nightTone({freq:f,time,peak,duration:.28,attack:.004,decay:.22,sustain:.01,release:1.55,pan});
+ nightTone({freq:f*2,time:time+.025,peak:peak*.42,duration:.20,attack:.004,decay:.16,sustain:.006,release:1.25,pan:-pan*.45});
+ nightTone({freq:f*2.5,time:time+.06,peak:peak*.15,duration:.14,attack:.003,decay:.12,sustain:.004,release:.95,pan:pan*.65});
+}
+function nightDot(time,s,accent=false){
+ const pan=(Math.random()*2-1)*.44;
+ const r=Math.random();
+ if(r<.70){
+   const f=nightNextNote(2,7,s);
+   nightTone({freq:f,time,peak:accent?.076:.062,duration:.18,attack:.005,decay:.17,sustain:.018,release:.48,pan});
+ }else if(r<.93){
+   nightWood(time,accent?.038:.030,pan);
+ }else{
+   const f=nightNextNote(8,10,s);
+   nightTone({freq:f,time,peak:.014,duration:.30,attack:.004,decay:.22,sustain:.006,release:.85,pan});
+ }
+}
+function nightFigure(time,s){
+ const spacing=.16+(1-s.speedNorm)*.11;
+ const count=Math.random()<.72?2:3;
+ for(let i=0;i<count;i++){
+   const at=time+i*spacing;
+   if(Math.random()<.72){
+     const f=nightNextNote(3,7,s);
+     nightTone({freq:f,time:at,peak:.038,duration:.15,attack:.004,decay:.14,sustain:.015,release:.40,pan:(i%2?-.24:.24)});
+   }else{
+     nightWood(at,.023,i%2?-.22:.22);
+   }
+ }
+}
+function chooseNightPattern(s){
+ if(s.still>.58)return{slots:[0,8],accent:[0]};
+ return Math.random()<.64?{slots:[0,7,13],accent:[0]}:{slots:[0,8],accent:[0]};
+}
+function scheduleNightStep(){
+ if(!nightRunning||!nightCtx)return;
+ const s=nightState||getState();
+ const speed=clamp(s.speedNorm),still=clamp(s.still);
+ if(nightPulse%16===0)nightPattern=chooseNightPattern(s);
+ const slot=nightPulse%16,pattern=nightPattern||chooseNightPattern(s);
+ const active=pattern.slots.includes(slot);
+ const offGrid=!active&&Math.random()<(0.010+speed*.030)*(1-still*.88);
+ const eventChance=clamp(.70+speed*.20-still*.50,.16,.92);
+ const now=nightCtx.currentTime+.025;
+
+ if((active||offGrid)&&Math.random()<eventChance){
+   const offset=offGrid?[.055,.11,.17][Math.floor(Math.random()*3)]:0;
+   nightDot(now+offset,s,pattern.accent.includes(slot));
+   if(pattern.accent.includes(slot)&&Math.random()<(0.07+speed*.13)*(1-still*.72)){
+     nightFigure(now+.04,s);
+   }
+ }
+
+ // "Really occasional" sparkle: normally ~25–45 s, a little more likely above 150 cm.
+ if(slot===0){
+   const levelBoost=clamp((s.levelCm-150)/70);
+   const sparkleChance=clamp(.15+speed*.045+levelBoost*.08-still*.035,.10,.30);
+   if(Math.random()<sparkleChance)nightSparkle(now+.35+Math.random()*.8,s);
+ }
+
+ nightPulse=(nightPulse+1)%16;
+ const stepSec=clamp(.50-speed*.14+still*.10,.35,.61);
+ nightTimer=setTimeout(scheduleNightStep,stepSec*1000);
+}
+function startNightPad(){
+ if(!nightCtx||nightPadNodes.length)return;
+ const specs=[
+   {f:73.42,pan:-.34,g:.0130,lfo:1/16.5},
+   {f:110.00,pan:.10,g:.0110,lfo:1/19.2},
+   {f:164.81,pan:.32,g:.0080,lfo:1/22.0}
+ ];
+ specs.forEach((sp,i)=>{
+   const o=nightCtx.createOscillator(),g=nightCtx.createGain(),p=nightCtx.createStereoPanner();
+   const lfo=nightCtx.createOscillator(),depth=nightCtx.createGain();
+   o.type="sine";o.frequency.value=sp.f;p.pan.value=sp.pan;g.gain.value=sp.g;
+   lfo.type="sine";lfo.frequency.value=sp.lfo;depth.gain.value=sp.g*.28;
+   lfo.connect(depth).connect(g.gain);
+   o.connect(g).connect(p).connect(nightBus);
+   o.start();lfo.start();
+   nightPadNodes.push(o,g,p,lfo,depth);
+ });
+}
+function updateNightState(s){
+ nightState={...s};
+ if(!nightMaster||!nightFilter)return;
+ const now=nightCtx.currentTime;
+ const still=clamp(s.still),speed=clamp(s.speedNorm);
+ const target=.76*(1-still*.12);
+ nightMaster.gain.setTargetAtTime(target,now,.8);
+ nightFilter.frequency.setTargetAtTime(3500+speed*900,now,1.0);
+}
+async function startNightEngine(s){
+ await ensureNightAudio();
+ nightState={...s};
+ if(!nightRunning){
+   nightRunning=true;nightPulse=0;nightPattern=chooseNightPattern(s);
+   startNightPad();
+   nightMaster.gain.setValueAtTime(.0001,nightCtx.currentTime);
+   scheduleNightStep();
+ }
+ updateNightState(s);
+}
+function stopNightEngine(){
+ if(!nightCtx||!nightMaster)return;
+ nightRunning=false;
+ if(nightTimer){clearTimeout(nightTimer);nightTimer=null}
+ nightMaster.gain.cancelScheduledValues(nightCtx.currentTime);
+ nightMaster.gain.setTargetAtTime(.0001,nightCtx.currentTime,.30);
+ const nodes=nightPadNodes.slice();nightPadNodes=[];
+ setTimeout(()=>{
+   if(nightRunning)return;
+   nodes.forEach(n=>{try{if(n&&typeof n.stop==="function")n.stop()}catch(_e){}try{n?.disconnect?.()}catch(_e){}});
+ },900);
+}
+function muteLayerEngines(s){
+ if(!layerFrames.length)return;
+ const motionRate=.78+s.speedNorm*.52;
+ const timeScale=clamp(1/Math.max(.1,motionRate)+s.still*3.5,.72,4.8);
+ layerFrames.forEach(frame=>{
+   try{frame.contentWindow?.__suikeiSetTide?.({gainFactor:0,pitchCents:0,direction:s.direction,timeScale})}catch(_e){}
+ });
+}
+
 function timeBandTokyo(){
  const h=Number(new Intl.DateTimeFormat("en-GB",{timeZone:"Asia/Tokyo",hour:"2-digit",hour12:false}).format(new Date()));
  if(h>=7&&h<12)return"morning";
@@ -857,7 +1076,6 @@ async function startSources(){
    try{const w=frame.contentWindow;if(!w?.__suikeiRunning?.())await w.__suikeiStart()}
    catch(err){console.warn("Layer start failed",err)}
  }
- applyAudio(true)
 }
 function layerMixFactors(s){
  const stillCut=[.08,.38,.06,0,.16,.40];
@@ -886,19 +1104,46 @@ function pushLayerState(s,tremMul=1){
    catch(_e){}
  })
 }
+async function syncPlayback(s,initial=false){
+ const desired=shouldUseNightSound(s)?"night":"layers";
+ const token=++audioSwitchToken;
+
+ if(desired==="night"){
+   clearTrem();
+   if(activeSoundMode!=="night"){
+     activeSoundMode="night";
+     await startNightEngine(s);
+     if(token!==audioSwitchToken||!playing)return;
+     muteLayerEngines(s);
+     // iPad uses one already-unlocked shared context, so inactive layers can be stopped to save CPU.
+     if(IPAD_AUDIO_OPTIMIZED)setTimeout(()=>{if(playing&&activeSoundMode==="night")stopSources()},700);
+   }else{
+     updateNightState(s);
+   }
+   return;
+ }
+
+ // Six-layer route.
+ if(activeSoundMode!=="layers"){
+   activeSoundMode="layers";
+   stopNightEngine();
+   await startSources();
+   if(token!==audioSwitchToken||!playing)return;
+ }
+ clearTrem();
+ pushLayerState(s,1);
+ if(s.levelCm>150){
+   const strength=clamp((s.levelCm-150)/70),started=performance.now();
+   layerTremTimer=setInterval(()=>{
+     if(!playing||activeSoundMode!=="layers"){clearTrem();return}
+     const phase=(performance.now()-started)/1000*2*Math.PI*.70;
+     pushLayerState(s,1+.045*strength*Math.sin(phase))
+   },80)
+ }
+}
 function applyAudio(initial=false){
  const s=getState();
- clearTrem();
- if(playing){
-   pushLayerState(s,1);
-   if(s.levelCm>150){
-     const strength=clamp((s.levelCm-150)/70),started=performance.now();
-     layerTremTimer=setInterval(()=>{
-       const phase=(performance.now()-started)/1000*2*Math.PI*.70;
-       pushLayerState(s,1+.045*strength*Math.sin(phase))
-     },80)
-   }
- }
+ if(playing)syncPlayback(s,initial).catch(err=>console.warn("Audio route sync failed",err));
  render()
 }
 function parseTokyo(s){return new Date(s+"+09:00").getTime()}
@@ -946,7 +1191,7 @@ async function fetchAuto(){
      fetchedAt:Date.now()
    };
    lastFetch=Date.now();autoError=null;
-   if(playing&&prevDir!=null&&prevDir!==autoData.rising)startSources();else applyAudio();
+   applyAudio();
  }catch(e){autoError=e;render()}
 }
 function fmtTime(ms){
@@ -980,18 +1225,25 @@ function render(){
  $("#detailLevel").textContent=Math.round(s.levelCm)+" cm";
  $("#detailDirection").textContent=still?"潮止まり":dir;
  $("#detailNext").textContent=mode==="auto"&&autoData?.next?autoData.next.type+" "+fmtTime(autoData.next.time):"--";
- $("#detailEffect").textContent=trem?"揺らぎ ON":"通常";
+ const nightSound=shouldUseNightSound(s);
+ $("#detailEffect").textContent=nightSound?(still?"夜の粒感 · 静穏":"夜の粒感"):(trem?"揺らぎ ON":"通常");
  $("#detailUpdate").textContent=mode==="auto"&&autoData?fmtTime(autoData.fetchedAt):"--";
 }
 
 async function togglePlay(){
  await ensureAudio();
+ await ensureNightAudio();
  if(!playing){
    playing=true;
+   activeSoundMode=null;
+   // Prime the six layers on the user gesture; auto night can then switch back at 07:00 without another tap.
    await startSources();
+   await syncPlayback(getState(),true);
  }else{
    playing=false;
+   activeSoundMode=null;
    clearTrem();
+   stopNightEngine();
    await stopSources();
  }
  render();
@@ -1001,7 +1253,7 @@ function setMode(m){
  $("#autoBtn").classList.toggle("active",m==="auto");
  $("#simBtn").classList.toggle("active",m==="sim");
  $("#simPanel").classList.toggle("show",m==="sim");
- if(playing)startSources();else render();
+ if(playing)applyAudio();else render();
  if(m==="auto"&&Date.now()-lastFetch>10*60*1000)fetchAuto();
 }
 $("#ringButton").addEventListener("click",togglePlay);
@@ -1012,13 +1264,28 @@ $("#simBtn").addEventListener("click",()=>setMode("sim"));
 $("#simSpeed").addEventListener("input",e=>{sim.speedNorm=+e.target.value/100;$("#simSpeedV").value=e.target.value+"%";applyAudio()});
 $("#simLevel").addEventListener("input",e=>{sim.levelCm=+e.target.value;$("#simLevelV").value=e.target.value+" cm";applyAudio()});
 $("#simStill").addEventListener("input",e=>{sim.minutesFromExtremum=+e.target.value;$("#simStillV").value=(+e.target.value>0?"+":"")+e.target.value+" min";applyAudio()});
+$("#simSoundMode").addEventListener("click",e=>{
+ const b=e.target.closest("button");if(!b)return;
+ sim.soundMode=b.dataset.v;
+ [...$("#simSoundMode").querySelectorAll("button")].forEach(x=>x.classList.toggle("active",x===b));
+ const layersOff=sim.soundMode==="night";
+ $("#simLayerSolo").classList.toggle("disabled",layersOff);
+ $("#simLayerSolo").setAttribute("aria-disabled",layersOff?"true":"false");
+ if(playing)applyAudio();else render();
+});
 $("#simDirection").addEventListener("click",e=>{
  const b=e.target.closest("button");if(!b)return;sim.direction=b.dataset.v;
  [...$("#simDirection").querySelectorAll("button")].forEach(x=>x.classList.toggle("active",x===b));
- if(playing)startSources();else render();
+ if(playing)applyAudio();else render();
 });
 $("#simLayerSolo").addEventListener("click",e=>{
  const b=e.target.closest("button");if(!b)return;
+ if(sim.soundMode!=="layers"){
+   sim.soundMode="layers";
+   [...$("#simSoundMode").querySelectorAll("button")].forEach(x=>x.classList.toggle("active",x.dataset.v==="layers"));
+   $("#simLayerSolo").classList.remove("disabled");
+   $("#simLayerSolo").setAttribute("aria-disabled","false");
+ }
  const i=clamp(Number(b.dataset.layer)||0,0,5);
  sim.layers[i]=!sim.layers[i];
  b.classList.toggle("active",sim.layers[i]);
