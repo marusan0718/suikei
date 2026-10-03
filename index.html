@@ -175,6 +175,10 @@ input[type=range]{width:100%;accent-color:var(--ring)}
   border:1px solid var(--line);background:transparent;color:var(--muted);border-radius:10px;padding:9px;font-size:11px
 }
 .segment button.active{background:var(--glass);color:var(--ink)}
+.layer-solo{grid-template-columns:repeat(5,1fr)}
+@media(max-width:560px){
+  .layer-solo{grid-template-columns:repeat(3,1fr)}
+}
 .note{font-size:10px;line-height:1.7;color:var(--muted2);margin:14px 0 0}
 @media(max-width:560px){
   .stage{padding-top:1vh}
@@ -710,11 +714,12 @@ body.playing .ring-level small{
       <button class="active" data-v="forward">上潮</button>
       <button data-v="reverse">下潮</button>
     </div>
-    <div class="segment" id="simTimeBand">
-      <button data-v="morning">朝</button>
-      <button class="active" data-v="afternoon">昼</button>
-      <button data-v="evening">夜</button>
-      <button data-v="offhours">深夜</button>
+    <div class="segment layer-solo" id="simLayerSolo">
+      <button class="active" data-layer="0">第1層</button>
+      <button data-layer="1">第2層</button>
+      <button data-layer="2">第3層</button>
+      <button data-layer="3">第4層</button>
+      <button data-layer="4">第5層</button>
     </div>
   </div>
 
@@ -735,7 +740,7 @@ let ctx=null,bufferF=null,bufferR=null,master=null,compressor=null,sources=[];
 let tremOsc=null,tremNodes=[];
 let layerFrames=[],layerReadyPromise=null,layerTremTimer=null;
 let autoData=null,lastFetch=0,autoError=null;
-let sim={direction:"forward",speedNorm:.5,levelCm:120,minutesFromExtremum:-20,timeBand:"afternoon"};
+let sim={direction:"forward",speedNorm:.5,levelCm:120,minutesFromExtremum:-20,timeBand:"afternoon",soloLayer:0};
 
 const $=q=>document.querySelector(q);
 const clamp=(x,a=0,b=1)=>Math.max(a,Math.min(b,x));
@@ -854,12 +859,20 @@ async function startSources(){
  applyAudio(true)
 }
 function layerMixFactors(s){
+ const stillCut=[.08,.38,.06,0,.16,.40];
+
+ if(mode==="sim"){
+   const solo=clamp(Number(sim.soloLayer)||0,0,4);
+   return [0,1,2,3,4,5].map(i=>
+     i===solo ? (1-stillCut[i]*s.still) : 0
+   );
+ }
+
  let f;
  if(s.timeBand==="morning")f=[.95,1.16,.92,.88,.95,1.12];
  else if(s.timeBand==="evening")f=[.78,.42,.68,.68,1.42,.36];
  else if(s.timeBand==="offhours")f=[.55,.20,.56,1.08,1.12,.18];
  else f=[1,1,1,1,1,1];
- const stillCut=[.08,.38,.06,0,.16,.40];
  return f.map((v,i)=>v*(1-stillCut[i]*s.still))
 }
 function pushLayerState(s,tremMul=1){
@@ -1004,10 +1017,10 @@ $("#simDirection").addEventListener("click",e=>{
  [...$("#simDirection").querySelectorAll("button")].forEach(x=>x.classList.toggle("active",x===b));
  if(playing)startSources();else render();
 });
-$("#simTimeBand").addEventListener("click",e=>{
+$("#simLayerSolo").addEventListener("click",e=>{
  const b=e.target.closest("button");if(!b)return;
- sim.timeBand=b.dataset.v;
- [...$("#simTimeBand").querySelectorAll("button")].forEach(x=>x.classList.toggle("active",x===b));
+ sim.soloLayer=clamp(Number(b.dataset.layer)||0,0,4);
+ [...$("#simLayerSolo").querySelectorAll("button")].forEach(x=>x.classList.toggle("active",x===b));
  if(playing)applyAudio();
  else render();
 });
