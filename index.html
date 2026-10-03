@@ -994,13 +994,15 @@ function updateAirplayMedia(forceSource=false){
     else a.addEventListener("loadedmetadata",resume,{once:true});
   }
   a.loop=true;
-  a.playbackRate=clamp((.94+s.speedNorm*.14)*(1-.11*s.still),.82,1.09);
-  a.defaultPlaybackRate=a.playbackRate;
-  if("preservesPitch" in a)a.preservesPitch=false;
-  if("webkitPreservesPitch" in a)a.webkitPreservesPitch=false;
+  // HomePod/AirPlay stays at native speed to avoid Safari/AirPlay varispeed artifacts.
+  a.playbackRate=1.0;
+  a.defaultPlaybackRate=1.0;
+  if("preservesPitch" in a)a.preservesPitch=true;
+  if("webkitPreservesPitch" in a)a.webkitPreservesPitch=true;
 
   stopAirplayTremolo();
-  const baseVol=clamp(.93*(1-.20*s.still),.55,.95);
+  // Extra headroom for HomePod's own DSP / loudness processing.
+  const baseVol=clamp(.80*(1-.18*s.still),.50,.82);
   if(s.levelCm>150){
     const strength=clamp((s.levelCm-150)/70);
     const started=performance.now();
