@@ -633,13 +633,41 @@ body.playing .ring-level small{
 
 
 <style>
-/* Audio output routing is handled by the operating system. */
+.homepod-btn.active{
+  background:var(--panel);
+  color:var(--text);
+  box-shadow:0 0 0 1px var(--line) inset;
+}
+.route-glyph{
+  position:relative;
+  width:20px;height:18px;
+  display:block;
+}
+.route-glyph:before{
+  content:"";
+  position:absolute;
+  left:2px;top:1px;
+  width:16px;height:10px;
+  border:1.5px solid currentColor;
+  border-radius:3px;
+}
+.route-glyph:after{
+  content:"";
+  position:absolute;
+  left:5px;bottom:0;
+  width:0;height:0;
+  border-left:5px solid transparent;
+  border-right:5px solid transparent;
+  border-bottom:7px solid currentColor;
+}
 </style>
 
 </head>
 <body><main>
   <div id="topRightHotspot" class="top-right-hotspot">
-    <div class="corner-actions"><button id="fullscreenBtn" class="corner-btn fullscreen-btn" aria-label="フルスクリーン">⛶</button>
+    <div class="corner-actions">
+      <button id="homePodBtn" class="corner-btn homepod-btn" aria-label="HomePod / AirPlay" aria-pressed="false" title="HomePod / AirPlay"><span class="route-glyph" aria-hidden="true"></span></button>
+      <button id="fullscreenBtn" class="corner-btn fullscreen-btn" aria-label="フルスクリーン">⛶</button>
     </div>
   </div>
 
@@ -668,6 +696,7 @@ body.playing .ring-level small{
 </section>
   <button id="settingsBtn" class="settings-dot" aria-label="詳細設定">⋯</button>
 </main>
+<audio id="homepodAudio" preload="auto" loop playsinline x-webkit-airplay="allow" style="display:none"></audio>
 
 <section id="panel" class="panel" aria-hidden="true">
   <div class="panel-head">
@@ -726,11 +755,38 @@ const LAYER_PAYLOADS=["PCFET0NUWVBFIGh0bWw+CjxodG1sIGxhbmc9ImphIj4KPGhlYWQ+CjxtZ
 const API="https://marine-api.open-meteo.com/v1/marine";
 const LAT=35.64,LON=139.76;
 const DATUM_OFFSET_CM=114.1;
+const HOMEPOD_TRACKS={
+  morning:{
+    forward:"homepod-audio/homepod-morning.m4a",
+    reverse:"homepod-audio/homepod-morning-reverse.m4a"
+  },
+  afternoon:{
+    forward:"homepod-audio/homepod-afternoon.m4a",
+    reverse:"homepod-audio/homepod-afternoon-reverse.m4a"
+  },
+  evening:{
+    forward:"homepod-audio/homepod-evening.m4a",
+    reverse:"homepod-audio/homepod-evening-reverse.m4a"
+  },
+  offhours:{
+    forward:"homepod-audio/homepod-offhours.m4a",
+    reverse:"homepod-audio/homepod-offhours-reverse.m4a"
+  }
+};
+const TIME_LABEL={morning:"朝",afternoon:"昼",evening:"夜",offhours:"深夜"};
 
 const IPAD_AUDIO_OPTIMIZED=/iPad|iPhone|iPod/.test(navigator.userAgent)||(navigator.platform==="MacIntel"&&navigator.maxTouchPoints>1);
 window.__suikeiUseSharedAudio=IPAD_AUDIO_OPTIMIZED;
 window.__suikeiSharedCtx=null;
 let mode="auto",playing=false;
+let outputMode="realtime";
+let homePodTrackKey="";
+let homePodSwitchToken=0;
+let homePodFade=1;
+let homePodBaseVolume=.92;
+let homePodTremMul=1;
+let homePodFadeTimer=null;
+let homePodTremTimer=null;
 let ctx=null,bufferF=null,bufferR=null,master=null,compressor=null,sources=[];
 let tremOsc=null,tremNodes=[];
 let layerFrames=[],layerReadyPromise=null,layerTremTimer=null;
@@ -855,9 +911,9 @@ async function startSources(){
 }
 function layerMixFactors(s){
  let f;
- if(s.timeBand==="morning")f=[.98,1.08,.98,.96,.98,1.07];
- else if(s.timeBand==="evening")f=[1.02,.90,1.04,1.08,.98,.92];
- else if(s.timeBand==="offhours")f=[.86,.65,.96,1.02,.86,.62];
+ if(s.timeBand==="morning")f=[.95,1.16,.92,.88,.95,1.12];
+ else if(s.timeBand==="evening")f=[.78,.42,.68,.68,1.42,.36];
+ else if(s.timeBand==="offhours")f=[.55,.20,.56,1.08,1.12,.18];
  else f=[1,1,1,1,1,1];
  const stillCut=[.08,.38,.06,0,.16,.40];
  return f.map((v,i)=>v*(1-stillCut[i]*s.still))
@@ -873,9 +929,167 @@ function pushLayerState(s,tremMul=1){
    catch(_e){}
  })
 }
+function homePodTrackFor(s){
+ const band=HOMEPOD_TRACKS[s.timeBand]?s.timeBand:"afternoon";
+ const dir=s.direction==="reverse"?"reverse":"forward";
+ return{band,dir,key:band+":"+dir,src:HOMEPOD_TRACKS[band][dir]};
+}
+function syncHomePodVolume(){
+ const a=$("#homepodAudio");
+ if(!a)return;
+ a.volume=clamp(homePodBaseVolume*homePodFade*homePodTremMul,0,1);
+}
+function clearHomePodTimers(){
+ if(homePodFadeTimer){clearInterval(homePodFadeTimer);homePodFadeTimer=null}
+ if(homePodTremTimer){clearInterval(homePodTremTimer);homePodTremTimer=null}
+ homePodTremMul=1;
+}
+function fadeHomePod(to,duration=2600){
+ return new Promise(resolve=>{
+   if(homePodFadeTimer){clearInterval(homePodFadeTimer);homePodFadeTimer=null}
+   const from=homePodFade,start=performance.now();
+   if(duration<=0){homePodFade=to;syncHomePodVolume();resolve();return}
+   homePodFadeTimer=setInterval(()=>{
+     const p=clamp((performance.now()-start)/duration);
+     const smooth=p*p*(3-2*p);
+     homePodFade=from+(to-from)*smooth;
+     syncHomePodVolume();
+     if(p>=1){clearInterval(homePodFadeTimer);homePodFadeTimer=null;resolve()}
+   },50)
+ })
+}
+function homePodRate(s){
+ // Keep tide movement perceptible without making the media sound unnatural.
+ return clamp((.94+s.speedNorm*.14)*(1-.11*s.still),.82,1.09)
+}
+function configureHomePodTremolo(s){
+ if(homePodTremTimer){clearInterval(homePodTremTimer);homePodTremTimer=null}
+ homePodTremMul=1;
+ syncHomePodVolume();
+ if(!playing||outputMode!=="homepod"||s.levelCm<=150)return;
+ const strength=clamp((s.levelCm-150)/70),started=performance.now();
+ homePodTremTimer=setInterval(()=>{
+   const phase=(performance.now()-started)/1000*2*Math.PI*.70;
+   homePodTremMul=1+.045*strength*Math.sin(phase);
+   syncHomePodVolume()
+ },80)
+}
+function updateMediaSession(s){
+ if(!("mediaSession" in navigator))return;
+ try{
+   navigator.mediaSession.metadata=new MediaMetadata({
+     title:"水景 — "+(TIME_LABEL[s.timeBand]||"昼"),
+     artist:"Suikei / Tokyo Bay",
+     album:s.direction==="forward"?"上潮":"下潮"
+   });
+   navigator.mediaSession.playbackState=playing?"playing":"paused";
+ }catch(_e){}
+}
+async function waitMediaReady(a,token){
+ if(a.readyState>=1)return;
+ await new Promise(resolve=>{
+   let done=false;
+   const finish=()=>{if(done)return;done=true;resolve()};
+   a.addEventListener("loadedmetadata",finish,{once:true});
+   a.addEventListener("error",finish,{once:true});
+   setTimeout(finish,3500)
+ });
+ if(token!==homePodSwitchToken)throw new Error("superseded")
+}
+async function switchHomePodTrack(s,{first=false}={}){
+ const a=$("#homepodAudio"),info=homePodTrackFor(s);
+ const token=++homePodSwitchToken;
+ if(!first&&!a.paused)await fadeHomePod(0,3200);
+ if(token!==homePodSwitchToken)return;
+
+ const wanted=new URL(info.src,location.href).href;
+ if(a.src!==wanted){
+   a.src=info.src;
+   a.load();
+   try{await waitMediaReady(a,token)}catch(_e){return}
+ }
+ if(token!==homePodSwitchToken)return;
+
+ // Start from a different point whenever the time-band/direction changes.
+ // The file itself is circularized, so native loop remains seamless.
+ if(Number.isFinite(a.duration)&&a.duration>40){
+   const span=Math.max(1,a.duration-25);
+   try{a.currentTime=8+Math.random()*span}catch(_e){}
+ }
+ a.loop=true;
+ a.playbackRate=homePodRate(s);
+ try{a.preservesPitch=false}catch(_e){}
+ try{a.webkitPreservesPitch=false}catch(_e){}
+ homePodTrackKey=info.key;
+ homePodBaseVolume=clamp(.93*(1-.20*s.still),.55,.95);
+ homePodFade=first?0:homePodFade;
+ syncHomePodVolume();
+
+ if(playing){
+   try{await a.play()}catch(err){console.warn("HomePod media play failed",err)}
+   await fadeHomePod(1,first?2800:3800)
+ }
+ configureHomePodTremolo(s);
+ updateMediaSession(s)
+}
+function applyHomePodState(s){
+ const a=$("#homepodAudio"),info=homePodTrackFor(s);
+ homePodBaseVolume=clamp(.93*(1-.20*s.still),.55,.95);
+ a.playbackRate=homePodRate(s);
+ try{a.preservesPitch=false}catch(_e){}
+ try{a.webkitPreservesPitch=false}catch(_e){}
+ syncHomePodVolume();
+ if(info.key!==homePodTrackKey&&playing){
+   switchHomePodTrack(s,{first:false}).catch(console.warn);
+ }else{
+   configureHomePodTremolo(s);
+   updateMediaSession(s)
+ }
+}
+async function startHomePod(){
+ const s=getState();
+ clearHomePodTimers();
+ await switchHomePodTrack(s,{first:true})
+}
+function stopHomePod(){
+ const a=$("#homepodAudio");
+ ++homePodSwitchToken;
+ clearHomePodTimers();
+ try{a.pause()}catch(_e){}
+ homePodFade=1;homePodBaseVolume=.92;homePodTremMul=1;
+ if("mediaSession" in navigator){try{navigator.mediaSession.playbackState="paused"}catch(_e){}}
+}
+async function toggleOutputMode(){
+ const a=$("#homepodAudio");
+ if(outputMode==="realtime"){
+   outputMode="homepod";
+   // Prepare a real HTMLMediaElement before showing Apple's route picker.
+   const s=getState(),info=homePodTrackFor(s);
+   if(a.src!==new URL(info.src,location.href).href){a.src=info.src;a.load()}
+   homePodTrackKey=info.key;
+   if(playing){
+     await stopSources();
+     await startHomePod()
+   }
+   render();
+   try{
+     if(typeof a.webkitShowPlaybackTargetPicker==="function")a.webkitShowPlaybackTargetPicker();
+   }catch(err){console.warn("AirPlay picker unavailable",err)}
+ }else{
+   outputMode="realtime";
+   stopHomePod();
+   if(playing){await ensureAudio();await startSources()}
+   render()
+ }
+}
 function applyAudio(initial=false){
  const s=getState();
  clearTrem();
+ if(outputMode==="homepod"){
+   if(playing)applyHomePodState(s);
+   render();
+   return
+ }
  if(playing){
    pushLayerState(s,1);
    if(s.levelCm>150){
@@ -933,7 +1147,7 @@ async function fetchAuto(){
      fetchedAt:Date.now()
    };
    lastFetch=Date.now();autoError=null;
-   if(playing&&prevDir!=null&&prevDir!==autoData.rising)startSources();else applyAudio();
+   applyAudio();
  }catch(e){autoError=e;render()}
 }
 function fmtTime(ms){
@@ -967,19 +1181,22 @@ function render(){
  $("#detailLevel").textContent=Math.round(s.levelCm)+" cm";
  $("#detailDirection").textContent=still?"潮止まり":dir;
  $("#detailNext").textContent=mode==="auto"&&autoData?.next?autoData.next.type+" "+fmtTime(autoData.next.time):"--";
- $("#detailEffect").textContent=trem?"揺らぎ ON":"通常";
+ $("#detailEffect").textContent=(outputMode==="homepod"?"HomePod · ":"")+(trem?"揺らぎ ON":"通常");
+ $("#homePodBtn").classList.toggle("active",outputMode==="homepod");
+ $("#homePodBtn").setAttribute("aria-pressed",outputMode==="homepod"?"true":"false");
  $("#detailUpdate").textContent=mode==="auto"&&autoData?fmtTime(autoData.fetchedAt):"--";
 }
 
 async function togglePlay(){
- await ensureAudio();
  if(!playing){
    playing=true;
-   await startSources();
+   if(outputMode==="homepod")await startHomePod();
+   else{await ensureAudio();await startSources()}
  }else{
    playing=false;
    clearTrem();
    await stopSources();
+   stopHomePod()
  }
  render();
 }
@@ -988,10 +1205,11 @@ function setMode(m){
  $("#autoBtn").classList.toggle("active",m==="auto");
  $("#simBtn").classList.toggle("active",m==="sim");
  $("#simPanel").classList.toggle("show",m==="sim");
- if(playing)startSources();else render();
+ if(playing)applyAudio();else render();
  if(m==="auto"&&Date.now()-lastFetch>10*60*1000)fetchAuto();
 }
 $("#ringButton").addEventListener("click",togglePlay);
+$("#homePodBtn").addEventListener("click",()=>{toggleOutputMode().catch(err=>console.warn("Output mode switch failed",err))});
 $("#settingsBtn").addEventListener("click",()=>{$("#panel").classList.add("open");$("#panel").setAttribute("aria-hidden","false")});
 $("#closeBtn").addEventListener("click",()=>{$("#panel").classList.remove("open");$("#panel").setAttribute("aria-hidden","true")});
 $("#autoBtn").addEventListener("click",()=>setMode("auto"));
@@ -1002,7 +1220,7 @@ $("#simStill").addEventListener("input",e=>{sim.minutesFromExtremum=+e.target.va
 $("#simDirection").addEventListener("click",e=>{
  const b=e.target.closest("button");if(!b)return;sim.direction=b.dataset.v;
  [...$("#simDirection").querySelectorAll("button")].forEach(x=>x.classList.toggle("active",x===b));
- if(playing)startSources();else render();
+ if(playing)applyAudio();else render();
 });
 $("#simTimeBand").addEventListener("click",e=>{
  const b=e.target.closest("button");if(!b)return;
@@ -1033,12 +1251,18 @@ document.addEventListener("fullscreenchange",()=>{
   $("#fullscreenBtn").setAttribute("aria-label",on?"フルスクリーンを終了":"フルスクリーン");
 });
 
+if("mediaSession" in navigator){
+ try{
+   navigator.mediaSession.setActionHandler("play",async()=>{if(!playing)await togglePlay()});
+   navigator.mediaSession.setActionHandler("pause",async()=>{if(playing)await togglePlay()});
+ }catch(_e){}
+}
 if(!IPAD_AUDIO_OPTIMIZED)initLayerEngines();
 
 // API: 10分に1回取得。UI/音の状態はローカル計算で1分ごとに更新。
 fetchAuto();
 setInterval(fetchAuto,10*60*1000);
-setInterval(()=>render(),60*1000);
+setInterval(()=>{if(playing)applyAudio();else render()},60*1000);
 render();
 </script>
 </body>
