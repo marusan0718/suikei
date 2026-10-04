@@ -905,24 +905,28 @@ function nightTone({freq,time,peak=.05,duration=.18,attack=.005,decay=.17,sustai
 }
 function nightWood(time,peak=.016,pan=0){
  if(!nightRunning||!nightCtx)return;
- const len=Math.floor(nightCtx.sampleRate*.11);
- const b=nightCtx.createBuffer(1,len,nightCtx.sampleRate),data=b.getChannelData(0);
- // Tapered noise avoids abrupt buffer edges.
- for(let i=0;i<len;i++){
-   const x=i/Math.max(1,len-1);
-   const taper=Math.sin(Math.PI*x);
-   data[i]=(Math.random()*2-1)*taper;
- }
- const src=nightCtx.createBufferSource();
- const hp=nightCtx.createBiquadFilter(),bp=nightCtx.createBiquadFilter();
- const g=nightCtx.createGain(),p=nightCtx.createStereoPanner();
- hp.type="highpass";hp.frequency.value=720;hp.Q.value=.45;
- bp.type="bandpass";bp.frequency.value=1350;bp.Q.value=1.15;
- p.pan.value=clamp(pan,-1,1);
- src.buffer=b;
- nightEnvelope(g,time,peak,.003,.032,.006,.035,.045);
- src.connect(hp).connect(bp).connect(g).connect(p).connect(nightBus);
- src.start(time);src.stop(time+.14);
+
+ // Long-run-safe wood grain: no random AudioBuffer allocation.
+ // Three very short resonant partials give a soft wooden "tick" without broadband noise.
+ const parts=[
+   {f:690,m:1.00,d:.050,p:-.03},
+   {f:1040,m:.46,d:.038,p:.04},
+   {f:1560,m:.16,d:.026,p:0}
+ ];
+ parts.forEach((sp,i)=>{
+   const o=nightCtx.createOscillator(),g=nightCtx.createGain(),p=nightCtx.createStereoPanner();
+   o.type=i===2?"triangle":"sine";
+   o.frequency.value=sp.f*(.985+Math.random()*.03);
+   p.pan.value=clamp(pan+sp.p,-1,1);
+   const pk=Math.max(.0002,peak*sp.m);
+   const start=time+i*.0015;
+   g.gain.setValueAtTime(.0001,start);
+   g.gain.exponentialRampToValueAtTime(pk,start+.0025);
+   g.gain.exponentialRampToValueAtTime(.0001,start+sp.d);
+   o.connect(g).connect(p).connect(nightBus);
+   o.start(start);
+   o.stop(start+sp.d+.025);
+ });
 }
 function nightSparkle(time,s){
  const levelBoost=clamp((s.levelCm-150)/70);
@@ -991,6 +995,8 @@ function scheduleNightStep(){
 
    // Pad watchdog: grain scheduling is already alive, so use it to revive a stalled background.
    if(nightRunning && performance.now()-nightPadLastSceneMs>19000){
+     if(nightPadTimer){clearTimeout(nightPadTimer);nightPadTimer=null}
+     nightPadGeneration++;
      scheduleNightPadScene(false);
    }
  }
@@ -1079,9 +1085,12 @@ function scheduleNightPadScene(first=false){
  const dwell=applyNightPadScene(nightPadScene,s,{stagger:true})||12;
 
  if(nightPadTimer)clearTimeout(nightPadTimer);
- // One simple recurrence timer only; watchdog in scheduleNightStep backs it up.
+ // One simple recurrence timer only; guard the callback so a delayed Safari timer
+ // cannot start a second scene chain after the watchdog has already recovered it.
+ const scheduledGeneration=nightPadGeneration;
  nightPadTimer=setTimeout(()=>{
    nightPadTimer=null;
+   if(!nightRunning||scheduledGeneration!==nightPadGeneration)return;
    scheduleNightPadScene(false);
  },dwell*1000);
 }
