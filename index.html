@@ -749,7 +749,7 @@ let layerFrames=[],layerReadyPromise=null,layerTremTimer=null;
 let autoData=null,lastFetch=0,autoError=null;
 let sim={direction:"forward",speedNorm:.5,levelCm:120,minutesFromExtremum:-20,timeBand:"afternoon",soundMode:"layers",layers:[true,false,false,false,false,false]};
 let activeSoundMode=null,audioSwitchToken=0;
-let nightCtx=null,nightBus=null,nightMaster=null,nightFilter=null,nightPadNodes=[],nightTimer=null,nightPadTimer=null,nightPadGeneration=0,nightPadLastSceneMs=0,nightRunning=false,nightPulse=0,nightPattern=null,nightState=null,nightLastNote=4,nightPadScene=0;
+let nightCtx=null,nightBus=null,nightHighpass=null,nightFilter=null,nightMaster=null,nightLimiter=null,nightPadNodes=[],nightTimer=null,nightPadTimer=null,nightPadGeneration=0,nightPadLastSceneMs=0,nightRunning=false,nightPulse=0,nightPattern=null,nightState=null,nightLastNote=4,nightPadScene=0;
 
 const $=q=>document.querySelector(q);
 const clamp=(x,a=0,b=1)=>Math.max(a,Math.min(b,x));
@@ -853,13 +853,30 @@ async function ensureNightAudio(){
    }
 
    nightBus=nightCtx.createGain();
+   nightHighpass=nightCtx.createBiquadFilter();
    nightFilter=nightCtx.createBiquadFilter();
    nightMaster=nightCtx.createGain();
+   nightLimiter=nightCtx.createDynamicsCompressor();
+
+   // v10 preview had low-end cleanup; reproduce that here to avoid speaker "burr".
+   nightHighpass.type="highpass";
+   nightHighpass.frequency.value=125;
+   nightHighpass.Q.value=.55;
+
    nightFilter.type="lowpass";
    nightFilter.frequency.value=3900;
    nightFilter.Q.value=.18;
+
    nightMaster.gain.value=.0001;
-   nightBus.connect(nightFilter).connect(nightMaster).connect(nightCtx.destination);
+
+   // Mostly inactive safety limiter: catches overlaps without audible pumping.
+   nightLimiter.threshold.value=-7;
+   nightLimiter.knee.value=2;
+   nightLimiter.ratio.value=10;
+   nightLimiter.attack.value=.004;
+   nightLimiter.release.value=.22;
+
+   nightBus.connect(nightHighpass).connect(nightFilter).connect(nightMaster).connect(nightLimiter).connect(nightCtx.destination);
 
    // Lightweight room: short taps instead of a convolution reverb.
    [[.14,.060,-.28],[.31,.038,.32],[.68,.018,-.12],[1.12,.009,.18]].forEach(([delay,gain,pan])=>{
@@ -886,16 +903,26 @@ function nightTone({freq,time,peak=.05,duration=.18,attack=.005,decay=.17,sustai
  o.connect(g).connect(p).connect(nightBus);
  o.start(time);o.stop(time+duration+release+.12);
 }
-function nightWood(time,peak=.032,pan=0){
+function nightWood(time,peak=.016,pan=0){
  if(!nightRunning||!nightCtx)return;
- const len=Math.floor(nightCtx.sampleRate*.15);
+ const len=Math.floor(nightCtx.sampleRate*.11);
  const b=nightCtx.createBuffer(1,len,nightCtx.sampleRate),data=b.getChannelData(0);
- for(let i=0;i<len;i++)data[i]=Math.random()*2-1;
- const src=nightCtx.createBufferSource(),hp=nightCtx.createBiquadFilter(),g=nightCtx.createGain(),p=nightCtx.createStereoPanner();
- hp.type="highpass";hp.frequency.value=420;hp.Q.value=.35;p.pan.value=clamp(pan,-1,1);
- src.buffer=b;nightEnvelope(g,time,peak,.002,.045,.01,.05,.055);
- src.connect(hp).connect(g).connect(p).connect(nightBus);
- src.start(time);src.stop(time+.18);
+ // Tapered noise avoids abrupt buffer edges.
+ for(let i=0;i<len;i++){
+   const x=i/Math.max(1,len-1);
+   const taper=Math.sin(Math.PI*x);
+   data[i]=(Math.random()*2-1)*taper;
+ }
+ const src=nightCtx.createBufferSource();
+ const hp=nightCtx.createBiquadFilter(),bp=nightCtx.createBiquadFilter();
+ const g=nightCtx.createGain(),p=nightCtx.createStereoPanner();
+ hp.type="highpass";hp.frequency.value=720;hp.Q.value=.45;
+ bp.type="bandpass";bp.frequency.value=1350;bp.Q.value=1.15;
+ p.pan.value=clamp(pan,-1,1);
+ src.buffer=b;
+ nightEnvelope(g,time,peak,.003,.032,.006,.035,.045);
+ src.connect(hp).connect(bp).connect(g).connect(p).connect(nightBus);
+ src.start(time);src.stop(time+.14);
 }
 function nightSparkle(time,s){
  const levelBoost=clamp((s.levelCm-150)/70);
@@ -908,16 +935,16 @@ function nightSparkle(time,s){
  nightTone({freq:f*2.5,time:time+.06,peak:peak*.15,duration:.14,attack:.003,decay:.12,sustain:.004,release:.95,pan:pan*.65});
 }
 function nightDot(time,s,accent=false){
- const pan=(Math.random()*2-1)*.44;
+ const pan=(Math.random()*2-1)*.42;
  const r=Math.random();
- if(r<.70){
+ if(r<.76){
    const f=nightNextNote(2,7,s);
-   nightTone({freq:f,time,peak:accent?.076:.062,duration:.18,attack:.005,decay:.17,sustain:.018,release:.48,pan});
- }else if(r<.93){
-   nightWood(time,accent?.038:.030,pan);
+   nightTone({freq:f,time,peak:accent?.054:.043,duration:.18,attack:.006,decay:.16,sustain:.014,release:.44,pan});
+ }else if(r<.95){
+   nightWood(time,accent?.018:.014,pan);
  }else{
    const f=nightNextNote(8,10,s);
-   nightTone({freq:f,time,peak:.014,duration:.30,attack:.004,decay:.22,sustain:.006,release:.85,pan});
+   nightTone({freq:f,time,peak:.0095,duration:.26,attack:.005,decay:.19,sustain:.004,release:.76,pan});
  }
 }
 function nightFigure(time,s){
@@ -927,9 +954,9 @@ function nightFigure(time,s){
    const at=time+i*spacing;
    if(Math.random()<.72){
      const f=nightNextNote(3,7,s);
-     nightTone({freq:f,time:at,peak:.038,duration:.15,attack:.004,decay:.14,sustain:.015,release:.40,pan:(i%2?-.24:.24)});
+     nightTone({freq:f,time:at,peak:.032,duration:.15,attack:.005,decay:.14,sustain:.012,release:.40,pan:(i%2?-.24:.24)});
    }else{
-     nightWood(at,.023,i%2?-.22:.22);
+     nightWood(at,.012,i%2?-.22:.22);
    }
  }
 }
@@ -1082,9 +1109,10 @@ function updateNightState(s){
  if(!nightMaster||!nightFilter)return;
  const now=nightCtx.currentTime;
  const still=clamp(s.still),speed=clamp(s.speedNorm);
- const target=.76*(1-still*.12);
+ const target=.58*(1-still*.10);
  nightMaster.gain.setTargetAtTime(target,now,.8);
- nightFilter.frequency.setTargetAtTime(3900+speed*800,now,1.0);
+ nightHighpass?.frequency?.setTargetAtTime(120+still*18,now,1.2);
+ nightFilter.frequency.setTargetAtTime(3900+speed*700,now,1.0);
  // Tide changes alter the level of the current voicing without resetting its staggered motion.
  if(nightRunning&&nightPadNodes.length){
    const spec=nightPadSceneSpec(nightPadScene,s);
